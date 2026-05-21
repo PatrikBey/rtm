@@ -1,107 +1,154 @@
 """
-sampled_test.py — multi-dataset model comparison on two groups
-===============================================================
+sampled_test.py — per-participant LATER model fitting on Go/No-Go data
+======================================================================
 
-Load two simulated RT datasets (group1 and group2) from CSV files,
-extract valid reaction times from condition 1, build shift and swivel
-models, and compare them.
+Load simulated RT data from simulated_rt_data_go_nogo.csv, then for every
+participant in every group extract valid go-trial RTs, build a single-dataset
+LATER model, sample from it, and collect posterior summaries.
 
-All values are hard-coded. No file checks or error handling.
+Intended to run inside the rtm Docker container:
+    docker run --rm -it \\
+        -v $(pwd)/code:/workspace/code \\
+        -v /mnt/h/RT/data:/data \\
+        rtm:dev python code/sampled_test.py
 
 Run section by section (or all at once).
 """
 
+import warnings
 import numpy as np
 import pandas as pd
 import pymc as pm
 import arviz as az
-import matplotlib.pyplot as plt
 import pylater
 
+# Suppress pylater default-prior warnings — we are aware they are defaults
+warnings.filterwarnings("ignore", category=UserWarning, module="pylater")
 
 # =============================================================================
-# SECTION 1 — Load data from CSV files
+# SECTION 1 — Load data
 # =============================================================================
 
-print("=== Section 1: Load data from CSV files ===")
+print("=== Section 1: Load data ===")
 
-df_group1 = pd.read_csv("/data/data/simulated_rt_data_single1.csv")
-df_group2 = pd.read_csv("/data/data/simulated_rt_data_single2.csv")
+DATA_PATH = "/data/simulated_rt_data_go_nogo.csv"
 
-print(f"Group 1 shape: {df_group1.shape}")
-print(f"Group 2 shape: {df_group2.shape}")
+df = pd.read_csv(DATA_PATH)
+
+print(f"Loaded {len(df)} rows")
+print(f"Groups      : {sorted(df['group'].unique())}")
+print(f"Participants: {df['participant_id'].nunique()} total")
 print()
 
 
 # =============================================================================
-# SECTION 2 — Extract valid RTs from condition 1
-# =============================================================================
-# Condition 1 is "Standard Go/No-Go"
-# Filter for:
-#   - condition_id == 1
-#   - trial_type == "go" (only go trials have valid RTs)
-#   - correct == True (exclude errors/omissions)
-#   - rt_ms is not NaN
-
-print("=== Section 2: Extract valid RTs from condition 1 ===")
-
-# Group 1
-cond1_group1 = df_group1[df_group1["condition_id"] == 1]
-valid_group1 = cond1_group1[
-    (cond1_group1["trial_type"] == "go") &
-    (cond1_group1["correct"] == True) &
-    (cond1_group1["rt_ms"].notna())
-]
-rt_ms_group1 = valid_group1["rt_ms"].values
-rt_s_group1 = rt_ms_group1 / 1000.0
-
-# Group 2
-cond1_group2 = df_group2[df_group2["condition_id"] == 1]
-valid_group2 = cond1_group2[
-    (cond1_group2["trial_type"] == "go") &
-    (cond1_group2["correct"] == True) &
-    (cond1_group2["rt_ms"].notna())
-]
-rt_ms_group2 = valid_group2["rt_ms"].values
-rt_s_group2 = rt_ms_group2 / 1000.0
-
-print(f"Group 1 valid RTs: n={len(rt_ms_group1)}  "
-      f"median={np.median(rt_ms_group1):.0f} ms  "
-      f"std={np.std(rt_ms_group1):.1f} ms")
-print(f"Group 2 valid RTs: n={len(rt_ms_group2)}  "
-      f"median={np.median(rt_ms_group2):.0f} ms  "
-      f"std={np.std(rt_ms_group2):.1f} ms")
-print()
-
-
-# =============================================================================
-# SECTION 3 — Create Dataset objects
+# SECTION 2 — Per-participant model fitting
 # =============================================================================
 
-dataset_group1 = pylater.Dataset(name="group1", rt_s=rt_s_group1)
-dataset_group2 = pylater.Dataset(name="group2", rt_s=rt_s_group2)
+print("=== Section 2: Per-participant LATER model fitting ===")
 
-if True:
-    print("=== Section 3: Dataset summaries ===")
-    print(f"Group 1:  n={len(dataset_group1.rt_s):3d}  "
-          f"median RT={np.median(dataset_group1.rt_s)*1000:.0f} ms  "
-          f"median promptness={np.median(dataset_group1.promptness):.2f}")
-    print(f"Group 2:  n={len(dataset_group2.rt_s):3d}  "
-          f"median RT={np.median(dataset_group2.rt_s)*1000:.0f} ms  "
-          f"median promptness={np.median(dataset_group2.promptness):.2f}")
+results = []
+
+for group in sorted(df["group"].unique()):
+    group_df = df[df["group"] == group]
+    participant_ids = sorted(group_df["participant_id"].unique())
+    print(f"\n--- Group: {group} ({len(participant_ids)} participants) ---")
+    for pid in participant_ids:
+        pid_df = group_df[group_df["participant_id"] == pid]
+        # Valid go-trial RTs: correct responses only, no NaNs
+        valid = pid_df[
+            (pid_df["trial_type"] == "go") &
+            (pid_df["correct"] == True) &
+            (pid_df["rt_ms"].notna())
+        ]
+        rt_s = valid["rt_ms"].values / 1000.0
+        if len(rt_s) < 5:
+            print(f"  {pid}: skipped (only {len(rt_s)} valid trials)")
+            continue
+        dataset = pylater.Dataset(name=pid, rt_s=rt_s)
+        # share_type=None is the correct choice for a single dataset
+        model = pylater.build_default_model(datasets=[dataset])
+        with model:
+            idata = pm.sample(
+                draws=500,
+                tune=500,
+                chains=2,
+                random_seed=42,
+                progressbar=False,
+            )
+        post = idata.posterior
+        k_mean     = float(post["k"].mean())
+        k_sd       = float(post["k"].std())
+        sigma_mean = float(post["sigma"].mean())
+        sigma_sd   = float(post["sigma"].std())
+        results.append({
+            "group":           group,
+            "participant_id":  pid,
+            "n_valid_trials":  len(rt_s),
+            "median_rt_ms":    round(np.median(rt_s) * 1000, 1),
+            "k_mean":          round(k_mean,     3),
+            "k_sd":            round(k_sd,       3),
+            "sigma_mean":      round(sigma_mean, 3),
+            "sigma_sd":        round(sigma_sd,   3),
+        })
+        print(f"  {pid}: n={len(rt_s):2d}  "
+              f"k={k_mean:.2f}±{k_sd:.2f}  "
+              f"sigma={sigma_mean:.3f}±{sigma_sd:.3f}")
+
+
+# =============================================================================
+# SECTION 3 — Group-level summaries across participants
+# =============================================================================
+
+print("\n=== Section 3: Group-level summary of per-participant posterior means ===\n")
+
+results_df = pd.DataFrame(results)
+
+for group in sorted(results_df["group"].unique()):
+    g = results_df[results_df["group"] == group]
+    print(f"Group: {group}  (n={len(g)} participants fitted)")
+    print(f"  k     : mean={g['k_mean'].mean():.3f}  "
+          f"sd={g['k_mean'].std():.3f}  "
+          f"range=[{g['k_mean'].min():.3f}, {g['k_mean'].max():.3f}]")
+    print(f"  sigma : mean={g['sigma_mean'].mean():.3f}  "
+          f"sd={g['sigma_mean'].std():.3f}  "
+          f"range=[{g['sigma_mean'].min():.3f}, {g['sigma_mean'].max():.3f}]")
     print()
 
+print("Full results table:")
+print(results_df.to_string(index=False))
+
 
 # =============================================================================
-# SECTION 4 — Build SHIFT model (shared sigma, separate k)
+# SECTION 4 — Shift vs Swivel model comparison across groups
 # =============================================================================
-# Shift model: sigma is shared across groups, each group has its own k
-# On reciprobit plot: parallel lines with different horizontal positions
+# One Dataset per group, pooling all valid go-trial RTs from every participant
+# in that group. The shift model shares sigma across groups (parallel lines on
+# the reciprobit plot); the swivel model shares k (lines pivot around a common
+# point). LOO-CV is used to compare predictive accuracy.
 
-print("=== Section 4: SHIFT model (parallel lines) ===")
+print("\n=== Section 4: Shift vs Swivel model comparison across groups ===\n")
+
+# --- 4a: Build one Dataset per group ---
+group_datasets = []
+for group in sorted(df["group"].unique()):
+    valid = df[
+        (df["group"] == group) &
+        (df["trial_type"] == "go") &
+        (df["correct"] == True) &
+        (df["rt_ms"].notna())
+    ]
+    rt_s = valid["rt_ms"].values / 1000.0
+    group_datasets.append(pylater.Dataset(name=group, rt_s=rt_s))
+    print(f"  {group}: {len(rt_s)} valid go-trial RTs pooled")
+
+print()
+
+# --- 4b: Shift model (shared sigma, separate k) ---
+print("Fitting SHIFT model (shared sigma, separate k)...")
 
 model_shift = pylater.build_default_model(
-    datasets=[dataset_group1, dataset_group2],
+    datasets=group_datasets,
     share_type="shift",
 )
 
@@ -111,39 +158,23 @@ with model_shift:
         tune=500,
         chains=2,
         random_seed=42,
-        progressbar=True,
+        progressbar=False,
     )
 
-summary_shift = az.summary(idata_shift, var_names=["sigma", "k"])
-print(summary_shift.to_string())
+print(az.summary(idata_shift, var_names=["sigma", "k"]).to_string())
 print()
 
-# Posterior predictive for shift
 with model_shift:
-    idata_shift = pm.sample_posterior_predictive(
-        trace=idata_shift,
-        extend_inferencedata=True,
-        random_seed=42,
+    pm.sample_posterior_predictive(
+        trace=idata_shift, extend_inferencedata=True, random_seed=42
     )
-
-# Compute log likelihood for shift
-with model_shift:
     pm.compute_log_likelihood(idata_shift)
 
-print("SHIFT model: posterior predictive and log-likelihood computed.")
-print()
-
-
-# =============================================================================
-# SECTION 5 — Build SWIVEL model (shared k, separate sigma)
-# =============================================================================
-# Swivel model: k is shared across groups, each group has its own sigma
-# On reciprobit plot: lines pivot around a common point
-
-print("=== Section 5: SWIVEL model (pivoting lines) ===")
+# --- 4c: Swivel model (shared k, separate sigma) ---
+print("Fitting SWIVEL model (shared k, separate sigma)...")
 
 model_swivel = pylater.build_default_model(
-    datasets=[dataset_group1, dataset_group2],
+    datasets=group_datasets,
     share_type="swivel",
 )
 
@@ -153,39 +184,24 @@ with model_swivel:
         tune=500,
         chains=2,
         random_seed=42,
-        progressbar=True,
+        progressbar=False,
     )
 
-summary_swivel = az.summary(idata_swivel, var_names=["k", "sigma"])
-print(summary_swivel.to_string())
+print(az.summary(idata_swivel, var_names=["k", "sigma"]).to_string())
 print()
 
-# Posterior predictive for swivel
 with model_swivel:
-    idata_swivel = pm.sample_posterior_predictive(
-        trace=idata_swivel,
-        extend_inferencedata=True,
-        random_seed=42,
+    pm.sample_posterior_predictive(
+        trace=idata_swivel, extend_inferencedata=True, random_seed=42
     )
-
-# Compute log likelihood for swivel
-with model_swivel:
     pm.compute_log_likelihood(idata_swivel)
 
-print("SWIVEL model: posterior predictive and log-likelihood computed.")
-print()
-
-
-# =============================================================================
-# SECTION 6 — Model comparison (SHIFT vs SWIVEL)
-# =============================================================================
-
-print("=== Section 6: Model comparison (LOO-CV) ===")
+# --- 4d: LOO-CV model comparison ---
+print("Model comparison (LOO-CV):")
 
 idata_shift_combined = pylater.combine_multiple_likelihoods(
     idata=idata_shift, combined_var_name="obs", combined_dim_name="trial"
 )
-
 idata_swivel_combined = pylater.combine_multiple_likelihoods(
     idata=idata_swivel, combined_var_name="obs", combined_dim_name="trial"
 )
@@ -196,61 +212,74 @@ comparison = az.compare(
     ic="loo",
 )
 
-if True:
-    print(comparison.to_string())
-    print()
-    print("Higher elpd_loo = better out-of-sample predictive accuracy.")
-    print("A difference > ~4 is considered meaningful.")
-    print()
+print(comparison.to_string())
+print()
+print("Higher elpd_loo = better out-of-sample predictive accuracy.")
+print("A difference > ~4 is considered meaningful.")
 
 
-# # =============================================================================
-# # SECTION 7 — Parameter interpretation
-# # =============================================================================
+# =============================================================================
+# SECTION 5 — Reciprobit plot — all groups in a single panel
+# =============================================================================
+# All three groups are overlaid on one reciprobit plot. Each group has its own
+# color applied consistently to the ECDF scatter and the posterior fit band.
 
-# print("=== Section 7: Parameter interpretation ===")
+print("\n=== Section 5: Reciprobit plots ===")
 
-# # Extract posterior means for shift model
-# post_shift = idata_shift.posterior
-# sigma_shift = float(post_shift["sigma"].mean())
-# k_shift_group1 = float(post_shift["k"].sel(dataset_obs='group1').mean())
-# k_shift_group2 = float(post_shift["k"].sel(dataset_obs='group2').mean())
-# print("\nSHIFT model (shared σ, separate k):")
-# print(f"  Shared sigma = {sigma_shift:.3f}")
-# print(f"  k (group 1) = {k_shift_group1:.2f}")
-# print(f"  k (group 2) = {k_shift_group2:.2f}")
-# print(f"  μ (group 1) = {sigma_shift * k_shift_group1:.2f}")
-# print(f"  μ (group 2) = {sigma_shift * k_shift_group2:.2f}")
-# print(f"  → Groups differ in mean promptness (shift on reciprobit plot)")
+import matplotlib
+matplotlib.use("Agg")   # non-interactive backend — safe inside the container
+import matplotlib.pyplot as plt
 
-# # Extract posterior means for swivel model
-# post_swivel = idata_swivel.posterior
-# k_swivel = float(post_swivel["k"].mean())
-# sigma_swivel_group1 = float(post_swivel["sigma"].sel(dataset_obs='group1').mean())
-# sigma_swivel_group2 = float(post_swivel["sigma"].sel(dataset_obs='group2').mean())
-# print("\nSWIVEL model (shared k, separate σ):")
-# print(f"  Shared k = {k_swivel:.2f}")
-# print(f"  sigma (group 1) = {sigma_swivel_group1:.3f}")
-# print(f"  sigma (group 2) = {sigma_swivel_group2:.3f}")
-# print(f"  → Groups differ in decision variability (pivot on reciprobit plot)")
-# print()
+PLOT_PATH = "/data/data/reciprobit_groups.png"
 
+colors = {"control": "#2196F3", "frontal": "#F44336", "non-frontal": "#4CAF50"}
 
-# # =============================================================================
-# # SECTION 8 — Reciprobit plots: data from both groups
-# # =============================================================================
+fig, ax = plt.subplots(figsize=(8, 6))
+rp = pylater.ReciprobitPlot(fig_ax=(fig, ax))
 
-# print("=== Section 8: Reciprobit plots ===")
+for dataset in group_datasets:
+    color = colors[dataset.name]
+    rp.plot_data(
+        data=dataset,
+        plot_type="scatter",
+        color=color,
+        label=dataset.name,
+        zorder=3,
+    )
+    rp.plot_model(
+        idata=idata_swivel,
+        dataset_name=dataset.name,
+        fill_kwargs={"alpha": 0.15, "color": color},
+        line_kwargs={"color": color},
+    )
 
-# fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+# Build legend:
+#   Section 1 — one entry per group (color key)
+#   Section 2 — one entry per plot element (marker / line / ribbon)
+from matplotlib.patches import Patch
+import matplotlib.lines as mlines
 
-# rp = pylater.ReciprobitPlot(fig_ax=(fig, ax))
-# rp.plot_data(data=dataset_group1, plot_type="scatter")
-# rp.plot_data(data=dataset_group2, plot_type="scatter")
-# ax.set_title("Group 1 vs Group 2: Reciprobit plot (condition 1)")
-# ax.legend(["Group 1", "Group 2"])
+group_handles = [
+    mlines.Line2D([0], [0], color=colors[ds.name], linewidth=2,
+                  marker="o", markersize=5, label=ds.name)
+    for ds in group_datasets
+]
 
-# plt.tight_layout()
-# plt.savefig("/data/sampled_reciprobit.png", dpi=120)
-# print("  saved sampled_reciprobit.png")
-# print()
+style_handles = [
+    mlines.Line2D([0], [0], color="gray", linestyle="none",
+                  marker="o", markersize=5,  label="ECDF data"),
+    mlines.Line2D([0], [0], color="gray", linewidth=2,
+                  label="posterior median"),
+    Patch(facecolor="gray", alpha=0.30,    label="95% credible interval"),
+]
+
+# Blank spacer entry used as a visual section divider
+spacer = mlines.Line2D([], [], linestyle="none", label="")
+
+all_handles = group_handles + [spacer] + style_handles
+ax.legend(handles=all_handles, fontsize=9, framealpha=0.9)
+ax.set_title("Reciprobit plot — pooled RTs per group (swivel model fit)")
+
+plt.tight_layout()
+plt.savefig(PLOT_PATH, dpi=150, bbox_inches="tight")
+print(f"  saved {PLOT_PATH}")

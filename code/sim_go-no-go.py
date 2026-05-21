@@ -11,7 +11,7 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-DATA_DIR = '/data/data'
+DATA_DIR = '/data'
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -71,35 +71,13 @@ print(f"Design saved to: {DESIGN_PATH}")
 # SECTION 2 — Simulation helpers
 # ---------------------------------------------------------------------------
 
-# Group parameters
-GROUP_PARAMS = {
-    "control": {
-        "mean_rt": 350,
-        "sd_rt": 60,
-        "go_rate": 0.95,
-        "false_positive_rate": 0.05,
-    },
-    "frontal": {
-        "mean_rt": 450,
-        "sd_rt": 100,
-        "go_rate": 0.88,
-        "false_positive_rate": 0.25,
-    },
-    "non-frontal": {
-        "mean_rt": 380,
-        "sd_rt": 75,
-        "go_rate": 0.92,
-        "false_positive_rate": 0.08,
-    },
-}
-
 def truncated_normal_rt(mean, sd, n, rng, min_rt=100, max_rt=3000):
     """Sample n RTs from a truncated normal distribution."""
     rt = rng.normal(mean, sd, n)
     return np.clip(rt, min_rt, max_rt)
 
 
-def build_trial_list(nparticipant_id_trials, rng):
+def build_trial_list(n_trials, rng):
     """Return a list of trial dicts with balanced go/no-go."""
     trials = []
     half = n_trials // 2
@@ -107,7 +85,7 @@ def build_trial_list(nparticipant_id_trials, rng):
     rng.shuffle(trial_types)
     
     for i, trial_type in enumerate(trial_types):
-        trials.append(participant_id{
+        trials.append({
             "trial_index": i + 1,
             "trial_type": trial_type,
         })
@@ -116,7 +94,9 @@ def build_trial_list(nparticipant_id_trials, rng):
 
 def simulate_participant(participant_id, group, n_trials, rng):
     """Simulate all trials for one participant in a specific group."""
-    params = GROUP_PARAMS[group]
+    params = design["participant_groups"][group]
+    mean_rt = params["mean_rt_ms"]
+    sd_rt   = params["sd_rt_ms"]
     rows = []
     
     for trial in build_trial_list(n_trials, rng):
@@ -125,7 +105,7 @@ def simulate_participant(participant_id, group, n_trials, rng):
         if is_go:
             # For go trials: response based on go_rate
             if rng.random() < params["go_rate"]:
-                rt = float(truncated_normal_rt(params["mean_rt"], params["sd_rt"], 1, rng)[0])
+                rt = float(truncated_normal_rt(mean_rt, sd_rt, 1, rng)[0])
                 response = "touch"
                 correct = True
             else:
@@ -137,7 +117,7 @@ def simulate_participant(participant_id, group, n_trials, rng):
             # For no-go trials: false alarm based on false_positive_rate
             if rng.random() < params["false_positive_rate"]:
                 # False alarm (incorrect response on no-go)
-                rt = float(truncated_normal_rt(params["mean_rt"] + 50, params["sd_rt"], 1, rng)[0])
+                rt = float(truncated_normal_rt(mean_rt + 50, sd_rt, 1, rng)[0])
                 response = "touch"
                 correct = False
             else:
@@ -163,11 +143,12 @@ def simulate_participant(participant_id, group, n_trials, rng):
 # ---------------------------------------------------------------------------
 
 rng = np.random.default_rng(42)
-n_participants_per_group = 20
-n_trials = 80
+n_participants_per_group = design["n_participants_per_group"]
+n_trials                 = design["trials_per_participant"]
+groups                   = list(design["participant_groups"].keys())
 
 all_rows = []
-for group in ["control", "frontal", "non-frontal"]:
+for group in groups:
     for pid in range(1, n_participants_per_group + 1):
         participant_id = f"{group}_{pid:02d}"
         all_rows.extend(simulate_participant(participant_id, group, n_trials, rng))
@@ -176,8 +157,8 @@ df = pd.DataFrame(all_rows)
 df.to_csv(DATA_PATH, index=False)
 
 print(f"Simulated data saved to: {DATA_PATH}")
-print(f"  Groups           : {list(GROUP_PARAMS.keys())}")
-print(f"  Participants     : {n_participants_per_group} per group ({3 * n_participants_per_group} total)")
+print(f"  Groups           : {groups}")
+print(f"  Participants     : {n_participants_per_group} per group ({len(groups) * n_participants_per_group} total)")
 print(f"  Trials per person: {n_trials}")
 print(f"  Total trials     : {len(df)}")
 print(f"  Columns          : {list(df.columns)}")
