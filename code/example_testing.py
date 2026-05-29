@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 
 # tmp = numpy.genfromtxt('/data/patrik/WAIS/EXAMPLE/arise/sub-40183110_lesion_bin_AAL3v1.tsv', delimiter='\t', dtype = str)
 tmp = numpy.genfromtxt('/data/patrik/WAIS/EXAMPLE/arise/sub-40183110_lesion_bin_AAL3.tsv', delimiter='\t', dtype = str)
+tmp = numpy.genfromtxt('/data/patrik/WAIS/EXAMPLE/arise/sub-40372774_lesion_AAL3.tsv', delimiter='\t', dtype = str)
 
 sc = tmp[1:,1:].astype(float)
 rois = tmp[1:,0].tolist()
@@ -25,13 +26,18 @@ thsc = numpy.where(thsc<= numpy.quantile(sc[sc>0], 0.75), 0, thsc)
 plt.figure(figsize=(20,20))
 plt.imshow(numpy.where(thsc==0, numpy.nan, thsc), cmap='Greys')
 plt.colorbar()
-for xy, color, label in [(( 125,125),'darkorange','Precentral_R'),((102,102),'teal','Frontal_Sup_2_R'),((101,101),'royalblue','Frontal_Mid_R'),((103,103),'cornflowerblue','Frontal_Sup_Medial_R'),((133,133),'crimson','Supp_Motor_Area_R'),((94,94),'plum','Cingulate_Mid_R'),((78,78),'orchid','ACC_pre_R'),((80,80),'mediumvioletred','ACC_sup_R')]:
-    plt.scatter(*xy, s=100, c=color, alpha=0.33)
+# for xy, color, label in [(( 125,125),'darkorange','Precentral_R'),((102,102),'teal','Frontal_Sup_2_R'),((101,101),'royalblue','Frontal_Mid_R'),((103,103),'cornflowerblue','Frontal_Sup_Medial_R'),((133,133),'crimson','Supp_Motor_Area_R'),((94,94),'plum','Cingulate_Mid_R'),((78,78),'orchid','ACC_pre_R'),((80,80),'mediumvioletred','ACC_sup_R')]:
+#     plt.scatter(*xy, s=100, c=color, alpha=0.33)
+#     # plt.annotate(label, xy, textcoords='offset points', xytext=(6,0), va='center', fontsize=8)
+for xy, color, label in [(( 104,104),'darkorange','Fusiform'),((139,139),'teal','Temporal_sup'),((136,136),'royalblue','Temporal_Mid'),((137,137),'cornflowerblue','Temporal_Pole_Mid'),((135,135),'crimson','Temporal_inf')]:
+    plt.scatter(*xy, s=100, c=color, alpha=0.33,label=label)
+
     # plt.annotate(label, xy, textcoords='offset points', xytext=(6,0), va='center', fontsize=8)
 
 # plt.yticks(numpy.arange(len(rois)), rois)
 plt.title('Structural Connectivity Matrix')
-# plt.tight_layout()
+plt.tight_layout()
+plt.legend()
 plt.show()
 
 
@@ -58,10 +64,14 @@ plt.show()
 coords = numpy.genfromtxt('/data/patrik/WAIS/EXAMPLE/AAL3_coords.tsv', delimiter='\t', dtype = str)
 rois = coords[:,1].tolist()
 
-idx = [ rois.index(roi) for roi in ['Precentral_R', 'Frontal_Sup_2_R', 'Frontal_Mid_2_R', 'Supp_Motor_Area_R', 'Frontal_Sup_Medial_R', 'Cingulate_Mid_R', 'ACC_pre_R', 'ACC_sup_R'] ]
+idx = [ rois.index(roi) for roi in ['Fusiform_R', 'Temporal_sup_R', 'Temporal_Mid_R', 'Supp_Motor_Area_R', 'Frontal_Sup_Medial_R', 'Cingulate_Mid_R', 'ACC_pre_R', 'ACC_sup_R'] ]
+
+idx = [ rois.index(roi) for roi in ['Precentral_R', 'Frontal_Sup_2_R', 'Frontal_Mid_2_R', 'Temporal_Pole_Mid_R', 'Temporal_Inf_R'] ]
+
 
 loads = [4.64359656906241, 41.7479516191963, 10.3703703703704, 53.2686630113876, 23.1958762886598, 32.5465274625511, 15.2777777777778, 29.4559099437148]
 
+loads = [0.3177,8.69,13.1,0.34,8.86]
 fig, ax = plt.subplots(figsize=(10, 8))
 
 xy = coords[1:, 2:4].astype(float)  # all node coordinates (x, y)
@@ -71,6 +81,10 @@ ax.scatter(xy[:, 0], xy[:, 1], s=50, c='lightgray', alpha=0.5, zorder=2)
 
 # highlighted nodes scaled by lesion load
 roi_labels = ['Precentral_R', 'Frontal_Sup_2_R', 'Frontal_Mid_2_R', 'Supp_Motor_Area_R', 'Frontal_Sup_Medial_R', 'Cingulate_Mid_R', 'ACC_pre_R', 'ACC_sup_R']
+
+roi_labels = ['Fusiform_R', 'Temporal_sup_R', 'Temporal_Mid_R', 'Temporal_Pole_Mid_R', 'Temporal_Inf_R']
+
+
 hx, hy = coords[idx, 2].astype(float), coords[idx, 3].astype(float)
 ax.scatter(hx, hy, s=50 * numpy.array(loads), c='crimson', alpha=0.5, zorder=3)
 for x, y, label in zip(hx, hy, roi_labels):
@@ -99,4 +113,32 @@ import nilearn.plotting, nibabel
 nii = nibabel.load('/data/patrik/WAIS/EXAMPLE/sub-40183110_lesion_bin.nii.gz')
 nilearn.plotting.plot_connectome(thsc, node_coords=coords[1:,2:5].astype(float), node_color=node_colors, edge_threshold='80%', title='Structural Connectivity Graph (thresholded)')
 nilearn.plotting.plot_glass_brain(nii, alpha = 0.25)
+plt.show()
+
+
+import nilearn.plotting, nibabel
+nii = nibabel.load('/data/patrik/WAIS/EXAMPLE/sub-40183110_lesion_AAL3.nii.gz')
+nilearn.plotting.plot_glass_brain(nii, alpha = 0.25, cmap = 'BuPu')
+plt.show()
+
+
+
+
+tmp1 = numpy.genfromtxt('/data/patrik/WAIS/EXAMPLE/arise/sub-40183110_lesion_bin_AAL3.tsv', delimiter='\t', dtype = str)
+tmp2 = numpy.genfromtxt('/data/patrik/WAIS/EXAMPLE/arise/sub-40372774_lesion_AAL3.tsv', delimiter='\t', dtype = str)
+
+
+tmp1 = tmp1[1:,1:].astype(float)
+tmp2 = tmp2[1:,1:].astype(float)
+
+tmp = numpy.where(tmp1>numpy.quantile(tmp1[tmp1>0], 0.75), 1, 0) * 0.3 + numpy.where(tmp2>numpy.quantile(tmp2[tmp2>0], 0.75), 1, 0)*0.7
+
+plt.imshow(numpy.where(tmp==tmp,tmp,numpy.nan), cmap='Greys', interpolation='nearest')
+plt.colorbar()
+plt.show()
+
+import nilearn.plotting, nibabel
+nii = nibabel.load('/data/patrik/WAIS/EXAMPLE/sub-40372774_lesion.nii.gz')
+nilearn.plotting.plot_glass_brain(nii,)
+ alpha = 0.25, cmap = 'BuPu')
 plt.show()
