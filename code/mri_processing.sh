@@ -210,35 +210,3 @@ for f in $FILES; do
   fslmaths LesionAggregate.nii.gz -add LESIONS_MASKED/${f} LesionAggregate.nii.gz
 done
 
-
-
-Resample() {
-    # resampling input image to match reference dimensions
-    # ${1} input image to resample
-    # ${2} reference image for input dimensions
-    # ${3} optional: output image
-    if [ -z ${3} ]; then
-        export _outimage="${1%.nii.gz}_resample.nii.gz"
-    else
-        _outimage=${3}
-    fi
-    ${FSLDIR}/bin/flirt \
-        -cost "mutualinfo" \
-        -in ${1} \
-        -ref ${2} \
-        -out ${_outimage} \
-        -applyxfm \
-        -usesqform \
-        -interp nearestneighbour
-
-    ${FSLDIR}/bin/fslmaths \
-    ${_outimage} \
-    ${_outimage} \
-    -odt int
-}
-
-
-
-Resample AAL3v1_hemi.nii.gz MNI152_icbm_T1_1mm_brain.nii.gz AAL3v1_hemi_resample.nii.gz
-
-
