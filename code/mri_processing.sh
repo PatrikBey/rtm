@@ -7,7 +7,7 @@
 #                                                                       #
 #                                                                       #
 #                            RT MODELLING                               #
-# 
+#                                                                       #
 # The following script performs MRI processing of raw patient MRI data  #
 #                                                                       #
 # performed stpes include:                                              #
