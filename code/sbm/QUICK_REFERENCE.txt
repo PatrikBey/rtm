@@ -1,0 +1,243 @@
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                                                                               ║
+║                          QUICK REFERENCE CARD                                ║
+║              SBM-Based Lesion-Behavior Network Analysis Framework            ║
+║                                                                               ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+
+BASIC USAGE IN PYTHON SHELL
+=============================
+
+# Import all functions
+>>> from get_graphobject import create_multilayer_graph
+>>> from sbm_community_detection import fit_sbm_model
+>>> from null_model_validation import generate_null_models, compare_with_null
+>>> import numpy as np
+
+# Load data
+>>> adj = np.load('adjacencies.npy')              # (n_patients, 166, 166)
+>>> scores = np.load('behavioral_scores.npy')    # (n_patients,)
+>>> with open('node_names.txt') as f:
+...     names = [line.strip() for line in f]     # 166 labels
+
+# Step 1: Create graph
+>>> graph = create_multilayer_graph(adj, scores, names)
+
+# Step 2: Fit real model
+>>> real = fit_sbm_model(graph)
+
+# Step 3: Generate nulls
+>>> nulls = generate_null_models(adj, scores, names, n_null_models=100)
+
+# Step 4: Compare
+>>> comp = compare_with_null(real['entropy'], nulls)
+
+# Step 5: Interpret
+>>> print(f"P-value: {comp['p_value']:.4f}")
+>>> print(f"Significant: {comp['is_significant']}")
+
+
+FUNCTION SIGNATURES
+====================
+
+1. create_multilayer_graph()
+   ├─ Input:  adj_matrices, behavioral_values, node_names, edge_threshold=None
+   └─ Output: graph_tool.Graph object
+
+2. fit_sbm_model()
+   ├─ Input:  graph, mcmc_samples=100000, burn_in=50000, 
+   │          annealing_temps=(1,10), annealing_steps=100
+   └─ Output: dict {entropy, block_structure, n_blocks, state, entropy_trajectory}
+
+3. generate_null_models()
+   ├─ Input:  adj_matrices, behavioral_values, node_names,
+   │          n_null_models=100, edge_threshold=None,
+   │          mcmc_samples=100000, burn_in=50000, 
+   │          annealing_temps=(1,10), annealing_steps=100
+   └─ Output: dict {entropies, mean_entropy, std_entropy, percentiles, null_models}
+
+4. compare_with_null()
+   ├─ Input:  real_entropy, null_distribution
+   └─ Output: dict {z_score, percentile_rank, p_value, is_significant, ...}
+
+
+KEY PARAMETERS
+===============
+
+GRAPH CONSTRUCTION
+  edge_threshold: Percentile cutoff (0-100)
+    • None: keep all edges
+    • 50:   keep top 50% connected nodes
+    • 75:   keep top 25% connected nodes
+
+SBM FIT (all match Cipolotti et al. 2023)
+  mcmc_samples:     100000 (posterior samples)
+  burn_in:          50000  (MCMC burn-in)
+  annealing_temps:  (1, 10) (temperature range)
+  annealing_steps:  100    (iterations)
+
+NULL VALIDATION
+  n_null_models:    100    (permutations)
+  • Other params same as SBM fit
+
+
+OUTPUT KEYS - Quick Access
+===========================
+
+Real Results:
+  real['entropy']           → Model entropy (lower = better)
+  real['block_structure']   → Community IDs per node
+  real['n_blocks']          → Number of communities
+  real['entropy_trajectory']→ Entropy trace during MCMC
+
+Null Distribution:
+  nulls['entropies']        → Array of N entropy values
+  nulls['mean_entropy']     → Mean of null distribution
+  nulls['std_entropy']      → Std of null distribution
+  nulls['percentiles']      → Dict {5, 25, 50, 75, 95}
+
+Comparison:
+  comp['z_score']           → Standard deviations from null mean
+  comp['percentile_rank']   → Percentile (0-100) in null dist
+  comp['p_value']           → Significance (< 0.05 = significant)
+  comp['is_significant']    → Boolean result
+
+
+INTERPRETATION RULES
+====================
+
+Entropy Comparison:
+  ┌────────────────────────────────────────────────────────────┐
+  │ real < null_mean    → GOOD  (structure found)            │
+  │ real ≈ null_mean    → POOR  (no structure)               │
+  │ real > null_mean    → BAD   (worse than random)          │
+  └────────────────────────────────────────────────────────────┘
+
+P-Value Interpretation:
+  ┌────────────────────────────────────────────────────────────┐
+  │ p < 0.05  → SIGNIFICANT (reject null, structure is real) │
+  │ p ≥ 0.05  → NOT SIG    (fail to reject null)             │
+  │ p < 0.001 → VERY SIG   (strong evidence)                 │
+  └────────────────────────────────────────────────────────────┘
+
+Z-Score Interpretation:
+  ┌────────────────────────────────────────────────────────────┐
+  │ z < -2    → SIGNIFICANT (2+ std below null mean)          │
+  │ -2 ≤ z    → NOT SIG                                       │
+  │ z < -3    → HIGHLY SIG  (3+ std below null mean)          │
+  └────────────────────────────────────────────────────────────┘
+
+Percentile Rank:
+  ┌────────────────────────────────────────────────────────────┐
+  │ rank < 5  → Lower than 95% of null (significant)          │
+  │ 5-95      → Within distribution (not significant)         │
+  │ rank > 95 → Higher than nulls (unexpected)                │
+  └────────────────────────────────────────────────────────────┘
+
+
+EXTRACT COMMUNITIES
+====================
+
+# Get community assignments
+blocks = real['block_structure']
+
+# List nodes by community
+for community_id in range(real['n_blocks']):
+    nodes = np.where(blocks == community_id)[0]
+    regions = [names[i] for i in nodes]
+    print(f"Community {community_id}: {regions}")
+
+# Map back to anatomical names
+for i, community_id in enumerate(blocks):
+    print(f"{names[i]} → Community {community_id}")
+
+
+TROUBLESHOOTING
+================
+
+Graph has 0 edges?
+  → Check behavioral_values have non-zero values
+  → Check adjacency_matrices are binary (0 or 1)
+  → Try edge_threshold=None to keep all edges
+
+SBM runs forever?
+  → Reduce mcmc_samples (e.g., 50000)
+  → Reduce annealing_steps (e.g., 50)
+  → Apply stricter edge_threshold (e.g., 75)
+
+High entropy values?
+  → Normal if many nodes/edges
+  → Compare relative to null, not absolute
+  → Check if real < null_mean (that's what matters)
+
+Null distribution very wide?
+  → Normal with only 100 models
+  → Consider increasing n_null_models
+  → Check behavioral_values aren't all identical
+
+P-value = 1.0?
+  → Real entropy > all null entropies
+  → Means behavioral layer adds noise, not structure
+  → Check data quality and preprocessing
+
+
+FILE ORGANIZATION
+==================
+
+/mnt/h/GitHub/sssp/code/sbm/
+├── get_graphobject.py           ← Script 1: Graph construction
+├── sbm_community_detection.py   ← Script 2: Real SBM fit
+├── null_model_validation.py     ← Script 3: Null validation + comparison
+├── README.md                    ← Implementation overview
+├── USAGE_GUIDE.md               ← Detailed usage examples
+├── ARCHITECTURE.txt             ← Data flow diagrams
+└── QUICK_REFERENCE.txt          ← This file
+
+
+DEPENDENCIES
+=============
+
+Required:
+  • numpy
+  • graph_tool (pip: conda install -c conda-forge graph-tool)
+
+Optional:
+  • Jupyter/IPython (for interactive shell)
+  • matplotlib (for visualization)
+  • pandas (for data manipulation)
+
+
+PAPER REFERENCE
+================
+
+Cipolotti L, Ruffle JK, Mole J, et al.
+Graph lesion-deficit mapping of fluid intelligence.
+BRAIN. 2023;146(1):167-181.
+doi: 10.1093/brain/awac304
+
+Key innovation: Layered hierarchical SBM distinguishing behavioral 
+(APM performance) from pathological (lesion co-occurrence) effects
+
+
+ADVANCED TOPICS
+================
+
+Access BlockState object:
+  state = real['state']
+  state.entropy()           # Get current entropy
+  state.get_blocks()        # Get community assignments
+  state.mcmc_sweep()        # Run more MCMC iterations
+
+Back-project to brain:
+  # Use block assignments to create anatomical maps
+  blocks = real['block_structure']
+  # Map blocks to anatomical regions, create visualizations
+
+Bayesian posterior:
+  # All results are posterior from MCMC sampling
+  # entropy_trajectory shows evolution of entropy
+  # Can estimate uncertainty from trajectory
+
+
+═════════════════════════════════════════════════════════════════════════════════

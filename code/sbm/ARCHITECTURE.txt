@@ -1,0 +1,235 @@
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                                                                               ║
+║                    ARCHITECTURE & DATA FLOW DIAGRAM                           ║
+║            SBM-Based Lesion-Behavior Network Analysis Framework              ║
+║                                                                               ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           INPUT DATA (Patient Data)                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  adjacency_matrices (n_patients, 166, 166)    behavioral_values (n_patients) │
+│  ┌─────────────────────────────────────────┐   ┌───────────────────┐      │
+│  │ Binary adjacency matrices per patient   │   │ Behavioral scores │      │
+│  │ - 0/1 indicating edge presence/absence  │   │ (APM, BEHAVIOUR)  │      │
+│  │ - 166 × 166 for each of N patients      │   │ - One value/patient│      │
+│  └─────────────────────────────────────────┘   └───────────────────┘      │
+│                                                                             │
+│  node_names (166 labels)                                                  │
+│  ┌─────────────────────────────────────────────────────────────────┐      │
+│  │ Brain region labels (from node_names.txt)                       │      │
+│  └─────────────────────────────────────────────────────────────────┘      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+                    ┌───────────────────────────────┐
+                    │ Script 1: get_graphobject.py  │
+                    │ create_multilayer_graph()     │
+                    └───────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      MULTI-LAYER GRAPH OBJECT                              │
+│                     (graph_tool.Graph - undirected)                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Vertices: 166 nodes with 'label' property                                 │
+│  ┌─────────────────────────────────────────────────────────────────┐      │
+│  │ Node 0: "Region_A"  ├─ properties from node_names.txt          │      │
+│  │ Node 1: "Region_B"  │                                           │      │
+│  │ ...                 │                                           │      │
+│  │ Node 165: "Region_Z"│                                           │      │
+│  └─────────────────────────────────────────────────────────────────┘      │
+│                                                                             │
+│  Edges: Two-layer representation                                          │
+│  ┌─────────────────────────────────────────────────────────────────┐      │
+│  │ LAYER 1: BEHAVIOUR (weighted)                                   │      │
+│  │ ─────────────────────────────────────────                       │      │
+│  │ For each patient i:                                            │      │
+│  │   weighted_adj[i] = adjacency_matrix[i] × behavioral_value[i]  │      │
+│  │ Edge weight = sum of (adj[i,j,k] × behavior[i]) across patients│      │
+│  │                                                                 │      │
+│  │ LAYER 2: CO-OCCURRENCE (binary)                                │      │
+│  │ ─────────────────────────────────────────                      │      │
+│  │ Edge weight = sum of adjacency_matrix[i,j,k] across all patients│      │
+│  │ Represents: how many patients had this edge lesioned together   │      │
+│  └─────────────────────────────────────────────────────────────────┘      │
+│                                                                             │
+│  Metadata:                                                                 │
+│  ├─ n_patients: number of patients                                        │
+│  └─ edge_threshold_applied: filtering threshold (if used)                 │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                    ↙                           ↘
+    ┌────────────────────────────┐   ┌─────────────────────────────┐
+    │ Script 2: SBM on Real Data │   │ Script 3: Null Validation   │
+    │ sbm_community_detection.py │   │ null_model_validation.py    │
+    │ fit_sbm_model()            │   │ generate_null_models()      │
+    └────────────────────────────┘   └─────────────────────────────┘
+                    ↓                           ↓
+    ┌────────────────────────────┐   ┌─────────────────────────────┐
+    │ REAL MODEL RESULTS         │   │ NULL MODEL GENERATION       │
+    ├────────────────────────────┤   ├─────────────────────────────┤
+    │                            │   │                             │
+    │ ✓ entropy: X.XX            │   │ For i = 1 to N (default 100)│
+    │ ✓ block_structure: [...]   │   │ ├─ Permute behavioral_vals  │
+    │ ✓ n_blocks: M              │   │ ├─ Rebuild graph with perm  │
+    │ ✓ state: BlockState        │   │ ├─ Fit SBM model           │
+    │ ✓ entropy_trajectory       │   │ └─ Extract entropy         │
+    │                            │   │                             │
+    │ Process:                   │   │ Output:                     │
+    │ 1. BlockStateNested        │   │ ├─ entropies array          │
+    │ 2. Simulated annealing     │   │ ├─ mean_entropy             │
+    │ 3. MCMC sampling (100k)    │   │ ├─ std_entropy              │
+    │ 4. Entropy calculation     │   │ ├─ percentiles {5,25,50,75} │
+    │                            │   │ └─ null_models list         │
+    │ Distributions:             │   │                             │
+    │ - BEHAVIOUR: Gaussian      │   │                             │
+    │ - Co-occurrence: Poisson   │   │                             │
+    │                            │   │                             │
+    └────────────────────────────┘   └─────────────────────────────┘
+                    ↘                           ↙
+                    └───────────────────┬───────────────────┘
+                                        ↓
+        ┌───────────────────────────────────────────────────────────┐
+        │ Script 3: Statistical Comparison                         │
+        │ compare_with_null()                                      │
+        └───────────────────────────────────────────────────────────┘
+                                        ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     STATISTICAL COMPARISON RESULTS                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Z-SCORE ANALYSIS                                                          │
+│  ───────────────────                                                       │
+│  z_score = (real_entropy - null_mean) / null_std                           │
+│                                                                             │
+│  PERCENTILE RANK                                                           │
+│  ─────────────────                                                        │
+│  percentile_rank = (n_below / n_null) × 100                               │
+│  Where: n_below = count of null_entropies ≤ real_entropy                  │
+│                                                                             │
+│  P-VALUE (Primary Significance Test)                                      │
+│  ────────────────────────────────────                                     │
+│  p_value = (n_lower / n_null)                                             │
+│  Where: n_lower = count of null_entropies < real_entropy                  │
+│                                                                             │
+│  ┌─ Interpretation:                                                       │
+│  │  • p_value < 0.05: SIGNIFICANT (real structure > random)              │
+│  │  • p_value ≥ 0.05: NOT SIGNIFICANT (consistent with random)           │
+│  │  • Lower p-value: Stronger evidence of behavioral effects             │
+│  │                                                                        │
+│  │  Why lower entropy is better:                                         │
+│  │  • Entropy measures model uncertainty                                 │
+│  │  • Lower entropy = more confident community assignments               │
+│  │  • Null models have randomized behavior → higher entropy              │
+│  │  • Real data with structure → lower entropy                           │
+│  └─                                                                       │
+│                                                                             │
+│  Null Entropy Distribution (N=100):                                        │
+│  ────────────────────────────────────                                     │
+│              Frequency                                                     │
+│              │                                                            │
+│              │      ╭─╮                                                   │
+│              │      │ │                                                   │
+│              │    ╭─┤ ├─╮                                                 │
+│              │    │ │ │ │                                                 │
+│              │  ╭─┤ │ │ ├─╮                                               │
+│              │  │ │ │ │ │ │                                               │
+│              ├──┼─┼─┼─┼─┼─┼──→ Entropy                                    │
+│              │  5% 25% 50% 75% 95%                                        │
+│                        ↑                                                  │
+│                   Real Entropy (if p < 0.05)                             │
+│                   [typically much lower than distribution]                │
+│                                                                             │
+│  Output Dictionary:                                                       │
+│  ──────────────────                                                       │
+│  {                                                                        │
+│    'z_score': float,                                                      │
+│    'percentile_rank': float (0-100),                                      │
+│    'p_value': float,                                                      │
+│    'is_significant': bool,                                                │
+│    'n_below': int,                                                        │
+│    'n_null_models': int,                                                  │
+│    'real_entropy': float,                                                 │
+│    'null_mean': float,                                                    │
+│    'null_std': float                                                      │
+│  }                                                                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                        ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        COMMUNITY STRUCTURE EXTRACTION                       │
+│                                                                             │
+│  From real_results['block_structure']:                                    │
+│  ─────────────────────────────────────────                                │
+│  blocks = [2, 0, 1, 2, 0, 1, 2, ...]  ← community ID per node             │
+│                                                                             │
+│  Mapping nodes to communities:                                            │
+│  ──────────────────────────────                                           │
+│  for i, block_id in enumerate(blocks):                                    │
+│      print(f"{node_names[i]} → Community {block_id}")                      │
+│                                                                             │
+│  Example output:                                                          │
+│  ──────────────                                                           │
+│  Region_A → Community 0                                                   │
+│  Region_B → Community 1                                                   │
+│  Region_C → Community 2                                                   │
+│  Region_D → Community 0                                                   │
+│  ...                                                                      │
+│                                                                             │
+│  Groups nodes by block:                                                   │
+│  ──────────────────────                                                   │
+│  Community 0: [Region_A, Region_D, ...]  ← brain regions in block 0      │
+│  Community 1: [Region_B, ...]            ← brain regions in block 1      │
+│  Community 2: [Region_C, ...]            ← brain regions in block 2      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+
+KEY ALGORITHMIC FEATURES
+========================
+
+Graph Construction (Script 1):
+  • Layer aggregation: Patient-specific information consolidated
+  • BEHAVIOUR layer: Behavioral scores weighted onto network edges
+  • Co-occurrence layer: Lesion co-occurrence patterns preserved
+  • Edge filtering: Optional pruning of sparse connections
+  • Result: Undirected, weighted, multi-layer graph
+
+SBM Fitting (Script 2):
+  • Model: BlockStateNested (hierarchical, non-parametric Bayesian)
+  • Optimization: Simulated annealing (1-10 temperature range)
+  • MCMC: 100k posterior samples with 50k burn-in
+  • Edge distributions: BEHAVIOUR=Gaussian, Co-occurrence=Poisson
+  • Result: Community structure + entropy quality metric
+
+Null Validation (Script 3):
+  • Procedure: Behavioral score permutation (fully randomized)
+  • Iterations: 100 null models (configurable)
+  • Each null: Rebuild graph → fit SBM → extract entropy
+  • Distribution: Empirical null entropy from 100 models
+  • Comparison: Z-score, percentile rank, p-value
+
+
+INTERPRETATION FRAMEWORK
+========================
+
+Entropy Values:
+  • Real entropy << null mean:  ✓ Significant structure (p < 0.05)
+  • Real entropy ≈ null mean:   ✗ No significant structure (p ≥ 0.05)
+  • Real entropy >> null mean:  ✗ Worse fit than random (unusual)
+
+Community Interpretation:
+  • Blocks represent functionally-related regions
+  • Within-block edges: high behavioral/co-occurrence coupling
+  • Between-block edges: weak coupling
+  • Node assignment: regions contributing to fluid intelligence
+
+Statistical Interpretation:
+  • p < 0.05: Community structure unlikely by chance
+  • Percentile < 5: Real entropy in lower tail of distribution
+  • Z < -2: Very significant (rare under null)
+
+═════════════════════════════════════════════════════════════════════════════════
