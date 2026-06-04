@@ -31,12 +31,12 @@ def fit_sbm_model(graph,
                   annealing_temps=(1, 10),
                   annealing_steps=100):
     """
-    Fit hierarchical weighted stochastic block model to multi-layer graph.
+    Fit weighted stochastic block model to multi-layer graph.
     
     Based on the framework from Cipolotti et al. (2023) BRAIN 146: 167-181,
-    this function fits a Bayesian non-parametric hierarchical stochastic block
-    model to identify community structure in the multi-layer graph, disentangling
-    behavioral effects from pathological co-occurrence effects.
+    this function fits a Bayesian stochastic block model to identify community 
+    structure in the multi-layer graph, disentangling behavioral effects from 
+    pathological co-occurrence effects.
     
     The model:
     - Treats BEHAVIOUR layer weights as Gaussian distribution
@@ -66,15 +66,14 @@ def fit_sbm_model(graph,
         - 'entropy': Model entropy value (lower is better fit)
         - 'block_structure': Vertex partition array, block assignment per node
         - 'n_blocks': Number of blocks in optimal partition
-        - 'state': The BlockStateNested object for further analysis
+        - 'state': The BlockState object for further analysis
         - 'mcmc_samples': Number of samples used
         - 'burn_in': Burn-in used
     
     Notes
     -----
-    The function uses graph_tool's hierarchical stochastic block model with:
+    The function uses graph_tool's stochastic block model with:
     - Simulated annealing to find optimal partition
-    - Nested block structure (hierarchical)
     - Weighted edge model with mixed distributions per layer
     
     Lower entropy indicates better fit of community structure.
@@ -87,19 +86,16 @@ def fit_sbm_model(graph,
     behaviour_weights = g.ep.behaviour_weight
     cooccurrence_weights = g.ep.cooccurrence_weight
     
-    # Initialize nested block state with both layers as edge weights
-    # We create two separate edge property maps for the two weight types
-    state = inference.BlockStateNested(
+    # Initialize block state with both layers as edge weights
+    # Using BlockState (not nested) for weighted multi-layer edges
+    state = gt.BlockState(
         g,
-        state_args=dict(
-            recs=[behaviour_weights, cooccurrence_weights],
-            rec_types=["real-normal", "poisson"],  # BEHAVIOUR: Gaussian, co-occurrence: Poisson
-            rec_params=[
-                dict(mu=0., sigma=1.),
-                dict(mu=0., sigma=1.)
-            ]
-        ),
-        base_type=inference.BlockState
+        recs=[behaviour_weights, cooccurrence_weights],
+        rec_types=["real-normal", "discrete-poisson"],  # BEHAVIOUR: Gaussian, co-occurrence: Poisson
+        rec_params=[
+            dict(m0=0., k0=1, v0=1., nu0=3),  # real-normal parameters
+            dict(alpha=1, beta=1.)  # discrete-poisson parameters
+        ]
     )
     
     # Simulated annealing optimization
@@ -107,18 +103,16 @@ def fit_sbm_model(graph,
         # MCMC sampling at each temperature
         state.mcmc_sweep(
             niter=10,  # iterations at this temperature
-            beta=1.0/temp,  # inverse temperature
-            force_move=False,
-            allow_vacuous=False
+            beta=1.0/temp  # inverse temperature
         )
     
     # Final MCMC sampling with recorded entropy
     dS = np.zeros(mcmc_samples)
     for i in range(burn_in):
-        state.mcmc_sweep(niter=1, force_move=False, allow_vacuous=False)
+        state.mcmc_sweep(niter=1)
     
     for i in range(mcmc_samples):
-        state.mcmc_sweep(niter=1, force_move=False, allow_vacuous=False)
+        state.mcmc_sweep(niter=1)
         dS[i] = state.entropy()
     
     # Extract results
