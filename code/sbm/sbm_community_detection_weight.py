@@ -9,13 +9,14 @@
 #                   STROKE SUB-SCORE PREDICTION                         #
 #                                                                       #
 # The following script runs weighted nested SBM-based community        #
-# detection on the multi-layer graph object.                           #
+# detection on the multi-layer graph object using LayeredBlockState.   #
 #                                                                       #
-# Extends sbm_community_detection.py by replacing the flat BlockState  #
-# with NestedBlockState. Edge covariates (recs) are passed through     #
-# state_args to the base-level BlockState, so the Gaussian likelihood  #
-# on behaviour_weight and Poisson likelihood on cooccurrence_weight    #
-# are both preserved across all levels of the hierarchy.               #
+# Edges are strictly separated into two layers (behaviour and          #
+# co-occurrence), with edges appearing in both layers duplicated.      #
+# The nested hierarchy is inferred using minimize_nested_blockmodel_dl #
+# with LayeredBlockState as the base type, enabling proper Bayesian   #
+# inference where both edge covariates (Gaussian and Poisson           #
+# likelihoods) influence block detection at every hierarchy level.     #
 #                                                                       #
 # authors: Bey, Patrik                                                  #
 #                                                                       #
@@ -30,120 +31,101 @@ import graph_tool.all as gt
 from graph_tool import inference
 
 
-# ---- Weighted nested SBM community detection ---- #
-def fit_sbm_model(graph,
-                  mcmc_samples=100000,
-                  burn_in=50000,
-                  annealing_temps=(1, 10),
-                  annealing_steps=100):
+# ---- Weighted nested SBM community detection with LayeredBlockState ---- #
+def fit_nested_sbm_layered(graph,
+                           mcmc_samples=100000,
+                           burn_in=50000,
+                           annealing_temps=(1, 10),
+                           annealing_steps=100):
     """
-    Fit weighted nested stochastic block model to multi-layer graph.
+    Fit nested layered stochastic block model to multi-layer weighted graph.
 
-    Extends the flat BlockState approach in sbm_community_detection.py by
-    using NestedBlockState. Edge covariates are passed via state_args to the
-    base-level BlockState so weighted likelihoods are preserved at every
-    level of the hierarchy.
-
-    Based on the framework from Cipolotti et al. (2023) BRAIN 146: 167-181.
+    Uses LayeredBlockState as base for NestedBlockState to handle separate
+    weight likelihoods per layer during hierarchical inference.
 
     Parameters
     ----------
     graph : graph_tool.Graph
-        Multi-layer graph from create_multilayer_graph() with edge properties:
-        - 'behaviour_weight': BEHAVIOUR layer weights (real-valued)
-        - 'cooccurrence_weight': co-occurrence layer weights (integer counts)
+        Graph from create_multilayer_graph() with properties:
+        - 'behaviour_weight' : layer 0 weights (real-valued)
+        - 'cooccurrence_weight' : layer 1 weights (integer counts)
+        - 'layer' : layer assignment (0 or 1)
     mcmc_samples : int, optional
-        Number of posterior MCMC samples (default: 100000).
+        Posterior MCMC samples (default: 100000).
     burn_in : int, optional
         MCMC burn-in iterations (default: 50000).
     annealing_temps : tuple of float, optional
         (min_temp, max_temp) for simulated annealing (default: (1, 10)).
     annealing_steps : int, optional
-        Number of annealing temperature steps (default: 100).
+        Number of annealing steps (default: 100).
 
     Returns
     -------
     results : dict
-        Dictionary containing:
-        - 'entropy'           : Total model entropy (lower = better fit)
-        - 'block_structure'   : Level-0 vertex partition array
-        - 'n_blocks'          : Number of blocks at level 0
-        - 'state'             : The NestedBlockState object for further analysis
-        - 'n_levels'          : Number of levels in the hierarchy
-        - 'levels_n_blocks'   : List of block counts per level
-        - 'levels_entropy'    : List of entropy values per level
-        - 'mcmc_samples'      : Number of samples used
-        - 'burn_in'           : Burn-in used
-        - 'entropy_trajectory': Entropy at each posterior sample
-
-    Notes
-    -----
-    The NestedBlockState wraps a hierarchy of BlockState objects. The recs
-    and rec_types are forwarded to the base-level (level 0) BlockState via
-    state_args. Higher levels operate on the block membership graph and do
-    not require separate rec specifications.
-
-    rec_types:
-    - 'real-normal'      : Gaussian likelihood for behaviour_weight.
-      Prior: Normal-inverse-chi-squared with m0=0, k0=1, v0=1, nu0=3.
-    - 'discrete-poisson' : Poisson likelihood for cooccurrence_weight.
-      Prior: Gamma with alpha=1, beta=1.
+        Dictionary with keys:
+        - 'state' : NestedBlockState object
+        - 'entropy' : Final model entropy
+        - 'n_levels' : Number of hierarchy levels
+        - 'block_structure_level_0' : Level-0 block assignments
+        - 'n_blocks_level_0' : Number of blocks at level 0
+        - 'levels_n_blocks' : Block counts per level
+        - 'levels_entropy' : Entropy per level
+        - 'entropy_trajectory' : Entropy at each sample
+        - 'mcmc_samples' : Samples generated
+        - 'burn_in' : Burn-in used
     """
 
-    # Copy graph to avoid modifying original
     g = graph.copy()
 
-    # Extract edge properties (two layers)
-    behaviour_weights = g.ep.behaviour_weight
-    cooccurrence_weights = g.ep.cooccurrence_weight
-
-    # Initialize nested block state with weighted edge covariates at base level.
-    # state_args is forwarded to the underlying BlockState at level 0.
-    state = gt.NestedBlockState(
+    # Initialize nested block state with LayeredBlockState base
+    state = gt.minimize_nested_blockmodel_dl(
         g,
         state_args=dict(
-            recs=[behaviour_weights, cooccurrence_weights],
-            rec_types=["real-normal", "discrete-poisson"],
-            rec_params=[
-                dict(m0=0., k0=1, v0=1., nu0=3),  # Normal-inverse-chi-squared
-                dict(alpha=1, beta=1.)             # Gamma prior on Poisson rate
-            ]
+            base_type=gt.LayeredBlockState,
+            state_args=dict(
+                ec=g.ep.layer,
+                recs=[g.ep.behaviour_weight, g.ep.cooccurrence_weight],
+                rec_types=["real-normal", "discrete-poisson"],
+                layers=True,
+                deg_corr=True
+            )
         )
     )
 
-    # Simulated annealing: sweep from high temperature down to 1
+    # Annealing
     for temp in np.linspace(annealing_temps[1], annealing_temps[0], annealing_steps):
         state.mcmc_sweep(niter=10, beta=1.0 / temp)
 
     # Burn-in
-    for i in range(burn_in):
+    for _ in range(burn_in):
         state.mcmc_sweep(niter=1)
 
-    # Posterior sampling with entropy tracking
+    # Posterior sampling
     dS = np.zeros(mcmc_samples)
     for i in range(mcmc_samples):
         state.mcmc_sweep(niter=1)
         dS[i] = state.entropy()
 
-    # Extract level-wise information
-    levels_n_blocks = [level.get_B() for level in state.levels]
-    levels_entropy  = [level.entropy() for level in state.levels]
-
-    # Level-0 partition (finest resolution)
-    block_structure = state.levels[0].get_blocks()
-    n_blocks        = state.levels[0].get_B()
-
+    # Extract hierarchy
+    levels = state.get_levels()
+    block_structure_level_0 = state.project_partition(0, 0)
+    
+    if hasattr(block_structure_level_0, 'a'):
+        block_structure_array = block_structure_level_0.a
+    else:
+        block_structure_array = np.array([block_structure_level_0[v] for v in state.g.vertices()])
+    
     results = {
-        'entropy':            state.entropy(),
-        'block_structure':    block_structure.a,
-        'n_blocks':           n_blocks,
-        'state':              state,
-        'n_levels':           len(state.levels),
-        'levels_n_blocks':    levels_n_blocks,
-        'levels_entropy':     levels_entropy,
-        'mcmc_samples':       mcmc_samples,
-        'burn_in':            burn_in,
-        'entropy_trajectory': dS
+        'state': state,
+        'entropy': state.entropy(),
+        'n_levels': len(levels),
+        'block_structure_level_0': block_structure_array,
+        'n_blocks_level_0': block_structure_array.max() + 1,
+        'levels_n_blocks': [level.get_nonempty_B() for level in levels],
+        'levels_entropy': [level.entropy() for level in levels],
+        'entropy_trajectory': dS,
+        'mcmc_samples': mcmc_samples,
+        'burn_in': burn_in
     }
 
     return results

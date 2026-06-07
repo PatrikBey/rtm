@@ -110,15 +110,17 @@ for sub in subjects_loc:
         tmp_rois = [rois[i] for i in nz_idx]
         tmp_locs = [locations[i] for i in nz_idx]
         frontal_ratio = tmp_locs.count('Frontal') / len(tmp_locs)
+        parietal_ratio = tmp_locs.count('Parietal') / len(tmp_locs)
+        temporal_ratio = tmp_locs.count('Temporal') / len(tmp_locs)
         left = sum(1 for i in tmp_rois if i.endswith('_L'))
         right = sum(1 for i in tmp_rois if i.endswith('_R'))
         if left > right:
-            if frontal_ratio > 0.1:
+            if frontal_ratio > parietal_ratio and frontal_ratio > temporal_ratio:
                 sub_loc = 'FL'
             else:
                 sub_loc = 'NFL'
         elif right > left:
-            if frontal_ratio > 0.25:
+            if frontal_ratio > parietal_ratio and frontal_ratio > temporal_ratio:
                 sub_loc = 'FR'
             else:
                 sub_loc = 'NFR'
@@ -133,8 +135,7 @@ for sub in subjects_loc:
 
 
 
-sub='41626009'
-
+sub='41708477'
 
 initial_loc = loc[loc[:,0] == sub, 1][0]
 if initial_loc == '1':
@@ -147,19 +148,22 @@ elif initial_loc == '4':
     initial_loc = 'NFR'
 idx = numpy.where(loads[:,0] == f'sub-{sub}')[0]
 tmp_loads = loads[idx,1:].astype(float)
+tmp_loads = numpy.where(tmp_loads > 0, tmp_loads, 0)  # Set values <= 5% to 0
 nz_idx = numpy.where(tmp_loads > 0)[1]
 tmp_rois = [rois[i] for i in nz_idx]
 tmp_locs = [locations[i] for i in nz_idx]
 frontal_ratio = tmp_locs.count('Frontal') / len(tmp_locs)
+parietal_ratio = tmp_locs.count('Parietal') / len(tmp_locs)
+temporal_ratio = tmp_locs.count('Temporal') / len(tmp_locs)
 left = sum(1 for i in tmp_rois if i.endswith('_L'))
 right = sum(1 for i in tmp_rois if i.endswith('_R'))
 if left > right:
-    if frontal_ratio > 0.1:
+    if frontal_ratio > parietal_ratio and frontal_ratio > temporal_ratio:
         sub_loc = 'FL'
     else:
         sub_loc = 'NFL'
 elif right > left:
-    if frontal_ratio > 0.25:
+    if frontal_ratio > parietal_ratio and frontal_ratio > temporal_ratio:
         sub_loc = 'FR'
     else:
         sub_loc = 'NFR'
@@ -167,10 +171,9 @@ elif left == right == 0:
     sub_loc = 'Unknown'
 if sub_loc == initial_loc:
     print(f'{sub} location matches: {sub_loc}')
-    match_count +=1
 else:
-    mismatch_count +=1
     print(f'{sub} location mismatch: initial {initial_loc} vs computed {sub_loc}')
+
 
 
 

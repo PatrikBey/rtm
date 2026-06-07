@@ -48,7 +48,7 @@ with progress.bar.Bar('| GEN SYNTH SCORES|', max=len(lesion_files)) as bar:
         # Compute synthetic score as overlap with V1 mask
         overlap = numpy.sum(lesion_data * mask)
         synth[i, 0] = file.split('_')[0]
-        synth[i, 1] = overlap / mask.sum() + numpy.random.normal(0, 0.1)  # Add noise
+        synth[i, 1] = overlap / mask.sum() #+ numpy.random.normal(0, 0.1)  # Add noise
         bar.next()
 
-numpy.savetxt('/mnt/h/RT/data/synth_scores.csv', synth, delimiter=',', fmt='%s', header='ID,Synth_Score')
+numpy.savetxt('/mnt/h/RT/data/synth_scores_raw.csv', synth, delimiter=',', fmt='%s', header='ID,Synth_Score')
