@@ -60,13 +60,13 @@ def create_multilayer_graph(adjacency_matrices, behavioral_values, node_names,
     """
     
     n_patients, n_nodes_dim1, n_nodes_dim2 = adjacency_matrices.shape
-    assert n_nodes_dim1 == n_nodes_dim2 == 166, "Adjacency matrices must be 166x166"
+    assert n_nodes_dim1 == n_nodes_dim2, "Adjacency matrices must be square"
     assert len(behavioral_values) == n_patients, "behavioral_values length must match n_patients"
-    assert len(node_names) == 166, "node_names must contain exactly 166 labels"
+    assert len(node_names) == n_nodes_dim1, "node_names length must match adjacency matrix size"
     assert 0 <= edge_threshold <= 100, "edge_threshold must be between 0 and 100"
     
     # Compute layer weights
-    behaviour_weighted = np.zeros((166, 166))
+    behaviour_weighted = np.zeros((n_nodes_dim1, n_nodes_dim1))
     for i in range(n_patients):
         behaviour_weighted += adjacency_matrices[i] * behavioral_values[i]
     

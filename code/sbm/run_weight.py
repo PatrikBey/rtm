@@ -16,32 +16,31 @@ from sbm_community_detection_weight import fit_nested_sbm_layered
 
 
 path = '/mnt/h/RT/data'
-
-
+score = 'GoNoGo_tau'
+ATLAS = 'HCP-MMP1'
 
 discos = os.listdir(os.path.join(path,'DISCONNECTOMES'))
+subject_list = [f.split('_')[0] for f in discos if f.endswith(f'_{ATLAS}.tsv')]
 
 
-scores = np.genfromtxt(os.path.join(path, 'synth_scores_raw.csv'), dtype = str, delimiter = ',', skip_header=1)
-behaviour = scores[:,1].astype(np.float32)
-# lesion_locations = scores[:,1].tolist()
-subject_list = scores[:,0].tolist()
 
-node_names = np.genfromtxt(os.path.join(path, 'ATLAS','AAL3v1_coords_lobes.txt'), dtype=str, delimiter = '\t')[1:,0].tolist()
-locations = np.genfromtxt(os.path.join(path, 'ATLAS','AAL3v1_coords_lobes.txt'), dtype=str, delimiter = '\t')[1:,-1].tolist()
 
+
+
+
+part = np.genfromtxt(os.path.join(path, 'participants.tsv'), dtype=str, delimiter='\t')
+
+score_col = np.where(part[0] == score)[0][0]
+
+
+
+
+
+node_names = np.genfromtxt(os.path.join(path, 'ATLAS', f'{ATLAS}_areas.txt'), dtype=str, delimiter = '\t')[1:,3].tolist()
+locations = np.genfromtxt(os.path.join(path, 'ATLAS', f'{ATLAS}_areas.txt'), dtype=str, delimiter = '\t')[1:,5].tolist()
+dim = len(node_names)
 
 '''
-## FUNCTIONAL GROUPINGS (for node color coding)
-Network/Group	Regions
-Salience Network	Cingulate + Insula
-Default Mode / Limbic	Cingulate (posterior) + Medial temporal
-Executive / Frontoparietal	Frontal + Parietal
-Visual Stream	Occipital + Temporo-occipital
-Temporal/Limbic	Temporal + Medial temporal
-Subcortical	Thalamus + Subcortical
-BCM	Brainstem + Midbrain + Cerebellum
-
 ## ANATOMICAL GROUPINGS (for node color coding)
 Brainstem	Brainstem + Midbrain — Midbrain is literally a subdivision of the brainstem (along with pons and medulla)
 Cerebellum	Cerebellum — Standalone; functionally and anatomically distinct
@@ -54,47 +53,63 @@ Subcortical	Thalamus + Subcortical — Deep gray matter structures (note: thalam
 
 '''
 
-func_locations = ['Salience' if loc in ['Cingulate', 'Insula'] else
-                  'Default' if loc in ['Cingulate (posterior)', 'Medial temporal'] else
-                  'Frontoparietal' if loc in ['Frontal', 'Parietal'] else
-                  'Visual' if loc in ['Occipital', 'Temporo-occipital'] else
-                  'Temporal' if loc in ['Temporal', 'Medial temporal'] else
-                  'Subcortical' if loc in ['Thalamus', 'Subcortical'] else
-                  'BCM' if loc in ['Brainstem', 'Midbrain','Cerebellum'] else 'Other' for loc in locations]
+# func_locations = ['Salience' if loc in ['Cingulate', 'Insula'] else
+#                   'Default' if loc in ['Cingulate (posterior)', 'Medial temporal'] else
+#                   'Frontoparietal' if loc in ['Frontal', 'Parietal'] else
+#                   'Visual' if loc in ['Occipital', 'Temporo-occipital'] else
+#                   'Temporal' if loc in ['Temporal', 'Medial temporal'] else
+#                   'Subcortical' if loc in ['Thalamus', 'Subcortical'] else
+#                   'BCM' if loc in ['Brainstem', 'Midbrain','Cerebellum'] else 'Other' for loc in locations]
 
 
 loc_colours = ['crimson','fuchsia','purple','indigo','mediumslateblue','cornflowerblue','powderblue','cyan','teal','limegreen','olive','gold','darkorange']
 
-func_loc_colours = ['fuchsia','purple','cornflowerblue','teal','limegreen','gold','darkorange']
+# func_loc_colours = ['fuchsia','purple','cornflowerblue','teal','limegreen','gold','darkorange']
 
-locations = [f'{loc}_L' if idx < 166/2 else f'{loc}_R' for idx, loc in enumerate(func_locations)]
+# locations = [f'{loc}_L' if idx < 166/2 else f'{loc}_R' for idx, loc in enumerate(func_locations)]
 
-# ---- get disconnectomes ---- #
-adj_matrices = np.zeros([len(subject_list),166,166], dtype=np.int32)  # To store adjacency matrices for each subject
-empty_subjects = []  # To keep track of subjects with no disconnections
+# ---- get disconnectomes and behaviour (aligned, clean subjects only) ---- #
+
+subject_list_clean = []
+behaviour = []
+adj_matrices_list = []
+subjects_missing_score = []
+empty_subjects = []
+
 for subject in subject_list:
-    tmp = np.genfromtxt(os.path.join(path,'DISCONNECTOMES', f'{subject}_lesion_AAL3.tsv'), delimiter = '\t')
-    data = tmp[1:,1:].astype(np.float32)
+    val = part[part[:, 0] == subject, score_col]
+    if val.size == 0 or val[0] in ('', 'nan', 'NaN'):
+        subjects_missing_score.append(subject)
+        continue
+    tmp = np.genfromtxt(os.path.join(path, 'DISCONNECTOMES', f'{subject}_{ATLAS}.tsv'), delimiter='\t')
+    data = tmp[1:, 1:].astype(np.float32)
     if np.sum(data) == 0:
-        print(f"Subject {subject} has no disconnections.")
         empty_subjects.append(subject)
         continue
-    adj_matrices[subject_list.index(subject)] = np.where(data >= np.quantile(data[data>0],.5),1,0)
+    subject_list_clean.append(subject)
+    behaviour.append(float(val[0]))
+    adj_matrices_list.append(np.where(data >= np.quantile(data[data > 0], .5), 1, 0))
 
-print(f"Total subjects: {len(subject_list)}, Empty subjects: {len(empty_subjects)}")
+adj_matrices = np.stack(adj_matrices_list).astype(np.int32)
+
+print(f"Total subjects: {len(subject_list)}")
+print(f"  Included: {len(subject_list_clean)}")
+print(f"  Missing {score}: {len(subjects_missing_score)} — {subjects_missing_score}")
+print(f"  Empty disconnectome: {len(empty_subjects)} — {empty_subjects}")
 
 
 
 
-graph = create_multilayer_graph(adj_matrices, behaviour, node_names, edge_threshold=75)
+
+graph = create_multilayer_graph(adj_matrices, behaviour, node_names, edge_threshold=50)
 
 
 
 
 real_results = fit_nested_sbm_layered(
     graph,
-    mcmc_samples=100000,
-    burn_in=10000,
+    mcmc_samples=100,
+    burn_in=10,
     annealing_temps=(1, 10),
     annealing_steps=100
 )
@@ -131,7 +146,7 @@ ax.set_title('Entropy Trajectory During MCMC Sampling (Weighted Nested Hierarchi
 ax.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig('/mnt/h/RT/data/figures/RF_weighted_nested_entropy_trajectory_75.png', dpi=150, bbox_inches='tight')
+plt.savefig('/mnt/h/RT/data/figures/RF_weighted_nested_entropy_trajectory_50.png', dpi=150, bbox_inches='tight')
 print("\nEntropy trajectory saved to: /mnt/h/RT/data/figures/RF_weighted_nested_entropy_trajectory.png")
 plt.show()
 
@@ -143,12 +158,13 @@ pos = gt.sfdp_layout(g, cooling_step=0.99, epsilon=1e-3, max_iter=100)
 
 # Extract unique location names (without _L/_R suffix)
 unique_location_names = sorted(set([loc.rsplit('_', 1)[0] for loc in locations]))
+unique_location_names = sorted(set(locations))
 location_name_to_idx = {name: idx for idx, name in enumerate(unique_location_names)}
 n_locations = len(unique_location_names)
 
 # Convert func_loc_colours (named colors) to RGB tuples
 from matplotlib.colors import to_rgba
-distinct_colors = [to_rgba(color) for color in func_loc_colours]
+distinct_colors = [to_rgba(color) for color in loc_colours]
 
 # Create a custom colormap from these distinct colors
 from matplotlib.colors import ListedColormap
@@ -161,13 +177,13 @@ for v in g.vertices():
     node_idx = int(v)
     location = locations[node_idx]
     # Extract location name (remove _L/_R suffix)
-    location_name = location.rsplit('_', 1)[0]
-    side = location.rsplit('_', 1)[1]  # 'L' or 'R'
+    location_name = location#.rsplit('_', 1)[0]
+    # side = location.rsplit('_', 1)[1]  # 'L' or 'R'
     location_idx = location_name_to_idx[location_name]
     rgba = cmap(norm(location_idx))
     vertex_color[v] = rgba
     # Set shape: 0 for circle (left), 1 for triangle (right)
-    vertex_shape[v] = 0 if side == 'L' else 1
+    # vertex_shape[v] = 0 if side == 'L' else 1
 
 # Compute node sizes based on degree
 degree_map = g.degree_property_map("in")  # Get degree property map
