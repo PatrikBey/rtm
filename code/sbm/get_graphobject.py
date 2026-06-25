@@ -29,8 +29,8 @@ from graph_tool import inference
 
 
 # ---- multilayer graph construction ---- #
-def create_multilayer_graph(adjacency_matrices, behavioral_values, node_names, 
-                            edge_threshold=50):
+def create_multilayer_graph(adjacency_matrices, behavioral_values, node_names,
+                            edge_threshold=50, th_apply='split'):
     """
     Create a redundant two-layer graph for weighted nested SBM inference.
     
@@ -72,15 +72,23 @@ def create_multilayer_graph(adjacency_matrices, behavioral_values, node_names,
     
     cooccurrence_binary = np.sum(adjacency_matrices, axis=0)
     
-    # Apply shared percentile threshold
-    combined_nonzero = np.concatenate([
-        behaviour_weighted[behaviour_weighted > 0],
-        cooccurrence_binary[cooccurrence_binary > 0]
-    ])
-    threshold_value = np.percentile(combined_nonzero, edge_threshold)
-    
-    behaviour_weighted[behaviour_weighted < threshold_value] = 0
-    cooccurrence_binary[cooccurrence_binary < threshold_value] = 0
+    # Apply percentile threshold per layer or combined
+    if th_apply == 'split':
+        beh_nonzero = behaviour_weighted[behaviour_weighted > 0]
+        occ_nonzero = cooccurrence_binary[cooccurrence_binary > 0]
+        beh_thresh = np.percentile(beh_nonzero, edge_threshold) if beh_nonzero.size > 0 else 0
+        occ_thresh = np.percentile(occ_nonzero, edge_threshold) if occ_nonzero.size > 0 else 0
+        behaviour_weighted[behaviour_weighted < beh_thresh] = 0
+        cooccurrence_binary[cooccurrence_binary < occ_thresh] = 0
+        threshold_value = (beh_thresh, occ_thresh)
+    else:
+        combined_nonzero = np.concatenate([
+            behaviour_weighted[behaviour_weighted > 0],
+            cooccurrence_binary[cooccurrence_binary > 0]
+        ])
+        threshold_value = np.percentile(combined_nonzero, edge_threshold)
+        behaviour_weighted[behaviour_weighted < threshold_value] = 0
+        cooccurrence_binary[cooccurrence_binary < threshold_value] = 0
     
     # Filter nodes with edges
     combined_adj = (behaviour_weighted > 0) | (cooccurrence_binary > 0)
@@ -129,7 +137,7 @@ def create_multilayer_graph(adjacency_matrices, behavioral_values, node_names,
     g.ep.layer = layer_prop
     
     g.gp.n_patients = g.new_graph_property("int", n_patients)
-    g.gp.edge_threshold_applied = g.new_graph_property("double", threshold_value)
+    g.gp.edge_threshold_applied = g.new_graph_property("string", str(threshold_value))
     
     return g
 

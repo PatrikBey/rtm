@@ -100,11 +100,39 @@ def fit_nested_sbm_layered(graph,
     for _ in range(burn_in):
         state.mcmc_sweep(niter=1)
 
-    # Posterior sampling
+    # Posterior sampling with marginal accumulation
+    n_verts = g.num_vertices()
+    pv = None                                      # vertex marginals (block assignment distributions)
+    edge_mean = np.zeros((n_verts, n_verts))       # Welford running mean of edge rates
+    edge_M2   = np.zeros((n_verts, n_verts))       # Welford running sum of squared deviations
+
     dS = np.zeros(mcmc_samples)
     for i in range(mcmc_samples):
         state.mcmc_sweep(niter=1)
         dS[i] = state.entropy()
+
+        # Vertex marginals: accumulate block assignment counts per node
+        pv = state.collect_vertex_marginals(pv)
+
+        # Edge rate matrix: implied connection rate between each node pair
+        # under the current partition, using block-to-block edge counts
+        level0 = state.get_levels()[0]
+        b   = level0.get_blocks().a                        # block id per vertex
+        mrs = level0.get_matrix()                          # sparse (B x B) edge count matrix
+        nr  = np.bincount(b, minlength=int(b.max()) + 1)  # block sizes
+
+        edge_rate = np.zeros((n_verts, n_verts))
+        for e in g.edges():
+            u, v = int(e.source()), int(e.target())
+            r, s = b[u], b[v]
+            denom = nr[r] * nr[s] if r != s else nr[r] * (nr[r] - 1) / 2
+            rate = float(mrs[r, s]) / denom if denom > 0 else 0.0
+            edge_rate[u, v] = edge_rate[v, u] = rate
+
+        # Welford online update
+        delta       = edge_rate - edge_mean
+        edge_mean  += delta / (i + 1)
+        edge_M2    += delta * (edge_rate - edge_mean)
 
     # Extract hierarchy
     levels = state.get_levels()
@@ -124,6 +152,9 @@ def fit_nested_sbm_layered(graph,
         'levels_n_blocks': [level.get_nonempty_B() for level in levels],
         'levels_entropy': [level.entropy() for level in levels],
         'entropy_trajectory': dS,
+        'vertex_marginals': pv,
+        'edge_prob_mean': edge_mean,
+        'edge_prob_var': edge_M2 / mcmc_samples,
         'mcmc_samples': mcmc_samples,
         'burn_in': burn_in
     }

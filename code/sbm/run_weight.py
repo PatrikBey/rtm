@@ -17,6 +17,8 @@ from sbm_community_detection_weight import fit_nested_sbm_layered
 
 path = '/mnt/h/RT/data'
 score = 'GoNoGo_tau'
+# score = 'Foreperiod_Long_tau'
+
 ATLAS = 'HCP-MMP1'
 
 discos = os.listdir(os.path.join(path,'DISCONNECTOMES'))
@@ -36,8 +38,8 @@ score_col = np.where(part[0] == score)[0][0]
 
 
 
-node_names = np.genfromtxt(os.path.join(path, 'ATLAS', f'{ATLAS}_areas.txt'), dtype=str, delimiter = '\t')[1:,3].tolist()
-locations = np.genfromtxt(os.path.join(path, 'ATLAS', f'{ATLAS}_areas.txt'), dtype=str, delimiter = '\t')[1:,5].tolist()
+node_names = np.genfromtxt(os.path.join(path, 'ATLAS', f'{ATLAS}_areas.txt'), dtype=str, delimiter = '\t')[1:,0].tolist()
+locations = np.genfromtxt(os.path.join(path, 'ATLAS', f'{ATLAS}_areas.txt'), dtype=str, delimiter = '\t')[1:,2].tolist()
 dim = len(node_names)
 
 '''
@@ -66,7 +68,7 @@ loc_colours = ['crimson','fuchsia','purple','indigo','mediumslateblue','cornflow
 
 # func_loc_colours = ['fuchsia','purple','cornflowerblue','teal','limegreen','gold','darkorange']
 
-# locations = [f'{loc}_L' if idx < 166/2 else f'{loc}_R' for idx, loc in enumerate(func_locations)]
+locations = [f'{loc}_L' if idx < dim/2 else f'{loc}_R' for idx, loc in enumerate(locations)]
 
 # ---- get disconnectomes and behaviour (aligned, clean subjects only) ---- #
 
@@ -91,6 +93,7 @@ for subject in subject_list:
     adj_matrices_list.append(np.where(data >= np.quantile(data[data > 0], .5), 1, 0))
 
 adj_matrices = np.stack(adj_matrices_list).astype(np.int32)
+behaviour = list((np.array(behaviour) - np.mean(behaviour)) / np.std(behaviour))
 
 print(f"Total subjects: {len(subject_list)}")
 print(f"  Included: {len(subject_list_clean)}")
@@ -103,16 +106,37 @@ print(f"  Empty disconnectome: {len(empty_subjects)} — {empty_subjects}")
 
 graph = create_multilayer_graph(adj_matrices, behaviour, node_names, edge_threshold=50)
 
+n = graph.num_vertices()
+occ_layer = np.zeros((n, n))
+beh_layer = np.zeros((n, n))
+for e in graph.edges():
+    i, j = int(e.source()), int(e.target())
+    if graph.ep.layer[e] == 0:
+        beh_layer[i, j] = beh_layer[j, i] = graph.ep.behaviour_weight[e]
+    else:
+        occ_layer[i, j] = occ_layer[j, i] = graph.ep.cooccurrence_weight[e]
 
+
+plt.subplot(1,2,1)
+plt.imshow(np.where(occ_layer==0,np.nan,occ_layer),cmap='plasma')
+plt.colorbar()
+plt.title('occurence layer')
+plt.subplot(1,2,2)
+plt.imshow(np.where(beh_layer==0,np.nan,beh_layer),cmap='plasma')
+plt.colorbar()
+plt.title('behaviour layer')
+plt.show()
 
 
 real_results = fit_nested_sbm_layered(
     graph,
-    mcmc_samples=100,
-    burn_in=10,
-    annealing_temps=(1, 10),
-    annealing_steps=100
+    mcmc_samples=10000,
+    burn_in=100,
+    annealing_temps=(1, 5),
+    annealing_steps=1
 )
+
+edge_var = real_results['edge_prob_var']   # (n_nodes x n_nodes) posterior variance of edge rates
 
 # ---- Print hierarchical structure ---- #
 state_nested = real_results['state']
@@ -146,8 +170,8 @@ ax.set_title('Entropy Trajectory During MCMC Sampling (Weighted Nested Hierarchi
 ax.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig('/mnt/h/RT/data/figures/RF_weighted_nested_entropy_trajectory_50.png', dpi=150, bbox_inches='tight')
-print("\nEntropy trajectory saved to: /mnt/h/RT/data/figures/RF_weighted_nested_entropy_trajectory.png")
+plt.savefig(f'/mnt/h/RT/data/figures/RF_weighted_nested_entropy_trajectory_50_{score}.png', dpi=150, bbox_inches='tight')
+print(f"\nEntropy trajectory saved to: /mnt/h/RT/data/figures/RF_weighted_nested_entropy_trajectory_50_{score}.png")
 plt.show()
 
 # ---- Visualization of nested block structure ---- #
@@ -223,10 +247,10 @@ state_nested.draw(
     vertex_text_color='black',
     vertex_text_position=0,
     vertex_font_size=10,
-    output="/mnt/h/RT/data/figures/RF_weighted_nested_block_state_draw.png",
+    output=f"/mnt/h/RT/data/figures/RF_weighted_nested_block_state_draw_{score}.png",
     output_size=(1200, 1200)
 )
-print("Nested block state visualization saved to: /mnt/h/RT/data/figures/RF_weighted_nested_block_state_draw_75.png")
+print(f"Nested block state visualization saved to: /mnt/h/RT/data/figures/RF_weighted_nested_block_state_draw_{score}.png")
 
 # ---- Create location legend ---- #
 print("\nGenerating location legend...")
@@ -242,39 +266,30 @@ legend_labels = []
 
 for loc_idx, location_name in enumerate(unique_location_names):
     rgba = cmap(norm(loc_idx))
-    nodes_in_location = np.where(np.array([loc.rsplit('_', 1)[0] for loc in locations]) == location_name)[0]
-    
-    # Create legend entries for both left and right sides
-    # Left side (circle)
-    circle_element = Line2D([0], [0], marker='o', color='w', 
-                           markerfacecolor=rgba, markersize=10, 
-                           markeredgecolor='black', markeredgewidth=1.5,
-                           label=f"{location_name}_L ({len([n for n in nodes_in_location if locations[n].endswith('_L')])} nodes)")
-    legend_elements.append(circle_element)
-    
-    # Right side (triangle)
-    triangle_element = Line2D([0], [0], marker='^', color='w', 
-                             markerfacecolor=rgba, markersize=10, 
-                             markeredgecolor='black', markeredgewidth=1.5,
-                             label=f"{location_name}_R ({len([n for n in nodes_in_location if locations[n].endswith('_R')])} nodes)")
-    legend_elements.append(triangle_element)
+    n_nodes = np.sum(np.array(locations) == location_name)
+    marker = 'o' if location_name.endswith('_L') else '^'
+    element = Line2D([0], [0], marker=marker, color='w',
+                     markerfacecolor=rgba, markersize=10,
+                     markeredgecolor='black', markeredgewidth=1.5,
+                     label=f"{location_name} ({n_nodes} nodes)")
+    legend_elements.append(element)
 
-ax.legend(handles=legend_elements, 
-          loc='center', fontsize=10, frameon=True, 
-          title="Node Color and Shape by Location and Side\n(Circles=Left, Triangles=Right)", 
-          title_fontsize=12, ncol=2, 
+ax.legend(handles=legend_elements,
+          loc='center', fontsize=10, frameon=True,
+          title="Node Color by Location (circles=L, triangles=R)",
+          title_fontsize=12, ncol=2,
           fancybox=True, shadow=True)
 ax.axis('off')
 plt.tight_layout()
-plt.savefig('/mnt/h/RT/data/figures/RF_weighted_nested_location_legend.png', dpi=150, bbox_inches='tight')
+plt.savefig(f'/mnt/h/RT/data/figures/RF_weighted_nested_location_legend_{score}.png', dpi=150, bbox_inches='tight')
 print("Location legend saved to: /mnt/h/RT/data/figures/RF_weighted_nested_location_legend.png")
 plt.show()
 
-# ---- Print location distribution summary ---- #
-print("\nLocation Distribution Summary:")
-print(f"Total unique locations: {n_locations}")
-for location_name in unique_location_names:
-    nodes_in_location_l = np.where(np.array(locations) == f'{location_name}_L')[0]
-    nodes_in_location_r = np.where(np.array(locations) == f'{location_name}_R')[0]
-    print(f"  {location_name}_L: {len(nodes_in_location_l)} nodes (circles)")
-    print(f"  {location_name}_R: {len(nodes_in_location_r)} nodes (triangles)")
+# # ---- Print location distribution summary ---- #
+# print("\nLocation Distribution Summary:")
+# print(f"Total unique locations: {n_locations}")
+# for location_name in unique_location_names:
+#     nodes_in_location_l = np.where(np.array(locations) == f'{location_name}_L')[0]
+#     nodes_in_location_r = np.where(np.array(locations) == f'{location_name}_R')[0]
+#     print(f"  {location_name}_L: {len(nodes_in_location_l)} nodes (circles)")
+#     print(f"  {location_name}_R: {len(nodes_in_location_r)} nodes (triangles)")
