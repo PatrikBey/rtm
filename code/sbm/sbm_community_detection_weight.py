@@ -102,7 +102,6 @@ def fit_nested_sbm_layered(graph,
 
     # Posterior sampling with marginal accumulation
     n_verts = g.num_vertices()
-    pv = None                                      # vertex marginals (block assignment distributions)
     edge_mean = np.zeros((n_verts, n_verts))       # Welford running mean of edge rates
     edge_M2   = np.zeros((n_verts, n_verts))       # Welford running sum of squared deviations
 
@@ -110,9 +109,6 @@ def fit_nested_sbm_layered(graph,
     for i in range(mcmc_samples):
         state.mcmc_sweep(niter=1)
         dS[i] = state.entropy()
-
-        # Vertex marginals: accumulate block assignment counts per node
-        pv = state.collect_vertex_marginals(pv)
 
         # Edge rate matrix: implied connection rate between each node pair
         # under the current partition, using block-to-block edge counts
@@ -152,7 +148,6 @@ def fit_nested_sbm_layered(graph,
         'levels_n_blocks': [level.get_nonempty_B() for level in levels],
         'levels_entropy': [level.entropy() for level in levels],
         'entropy_trajectory': dS,
-        'vertex_marginals': pv,
         'edge_prob_mean': edge_mean,
         'edge_prob_var': edge_M2 / mcmc_samples,
         'mcmc_samples': mcmc_samples,

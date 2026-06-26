@@ -90,47 +90,49 @@ def create_multilayer_graph(adjacency_matrices, behavioral_values, node_names,
         behaviour_weighted[behaviour_weighted < threshold_value] = 0
         cooccurrence_binary[cooccurrence_binary < threshold_value] = 0
     
-    # Filter nodes with edges
-    combined_adj = (behaviour_weighted > 0) | (cooccurrence_binary > 0)
-    nodes_to_keep = np.where(np.sum(combined_adj, axis=1) > 0)[0]
-    
-    # Create graph
+    # Z-score normalize nonzero values in each layer independently
+    for layer_mat in [behaviour_weighted, cooccurrence_binary]:
+        mask = layer_mat > 0
+        if mask.any():
+            mu, sigma = layer_mat[mask].mean(), layer_mat[mask].std()
+            if sigma > 0:
+                layer_mat[mask] = (layer_mat[mask] - mu) / sigma
+
+    # Create graph — all nodes retained regardless of edge presence
     g = gt.Graph(directed=False)
-    g.add_vertex(len(nodes_to_keep))
-    
+    g.add_vertex(n_nodes_dim1)
+
     # Add node labels
     node_label_prop = g.new_vertex_property("string")
-    old_to_new_idx = {old_idx: new_idx for new_idx, old_idx in enumerate(nodes_to_keep)}
-    for idx, node_id in enumerate(nodes_to_keep):
-        node_label_prop[g.vertex(idx)] = str(node_names[node_id])
+    for idx in range(n_nodes_dim1):
+        node_label_prop[g.vertex(idx)] = str(node_names[idx])
     g.vp.label = node_label_prop
-    
+
     # Add redundant edges with dual weights
     behaviour_weight_prop = g.new_edge_property("double")
     cooccurrence_weight_prop = g.new_edge_property("double")
     layer_prop = g.new_edge_property("int")
-    
-    for i in nodes_to_keep:
-        for j in nodes_to_keep:
-            if i < j:
-                has_behaviour = behaviour_weighted[i, j] > 0
-                has_cooccurrence = cooccurrence_binary[i, j] > 0
-                
-                if has_behaviour or has_cooccurrence:
-                    behaviour_val = float(behaviour_weighted[i, j]) if has_behaviour else 0.0
-                    cooccurrence_val = float(cooccurrence_binary[i, j]) if has_cooccurrence else 0.0
-                    
-                    # Layer 0: behaviour weight active
-                    e0 = g.add_edge(g.vertex(old_to_new_idx[i]), g.vertex(old_to_new_idx[j]))
-                    behaviour_weight_prop[e0] = behaviour_val
-                    cooccurrence_weight_prop[e0] = 0.0
-                    layer_prop[e0] = 0
-                    
-                    # Layer 1: cooccurrence weight active
-                    e1 = g.add_edge(g.vertex(old_to_new_idx[i]), g.vertex(old_to_new_idx[j]))
-                    behaviour_weight_prop[e1] = 0.0
-                    cooccurrence_weight_prop[e1] = cooccurrence_val
-                    layer_prop[e1] = 1
+
+    for i in range(n_nodes_dim1):
+        for j in range(i + 1, n_nodes_dim1):
+            has_behaviour = behaviour_weighted[i, j] > 0
+            has_cooccurrence = cooccurrence_binary[i, j] > 0
+
+            if has_behaviour or has_cooccurrence:
+                behaviour_val = float(behaviour_weighted[i, j]) if has_behaviour else 0.0
+                cooccurrence_val = float(cooccurrence_binary[i, j]) if has_cooccurrence else 0.0
+
+                # Layer 0: behaviour weight active
+                e0 = g.add_edge(g.vertex(i), g.vertex(j))
+                behaviour_weight_prop[e0] = behaviour_val
+                cooccurrence_weight_prop[e0] = 0.0
+                layer_prop[e0] = 0
+
+                # Layer 1: cooccurrence weight active
+                e1 = g.add_edge(g.vertex(i), g.vertex(j))
+                behaviour_weight_prop[e1] = 0.0
+                cooccurrence_weight_prop[e1] = cooccurrence_val
+                layer_prop[e1] = 1
     
     g.ep.behaviour_weight = behaviour_weight_prop
     g.ep.cooccurrence_weight = cooccurrence_weight_prop

@@ -16,8 +16,8 @@ from sbm_community_detection_weight import fit_nested_sbm_layered
 
 
 path = '/mnt/h/RT/data'
-score = 'GoNoGo_tau'
-# score = 'Foreperiod_Long_tau'
+# score = 'GoNoGo_tau'
+score = 'Foreperiod_Long_tau'
 
 ATLAS = 'HCP-MMP1'
 
@@ -64,12 +64,18 @@ Subcortical	Thalamus + Subcortical — Deep gray matter structures (note: thalam
 #                   'BCM' if loc in ['Brainstem', 'Midbrain','Cerebellum'] else 'Other' for loc in locations]
 
 
-loc_colours = ['crimson','fuchsia','purple','indigo','mediumslateblue','cornflowerblue','powderblue','cyan','teal','limegreen','olive','gold','darkorange']
+# loc_colours = ['crimson','fuchsia','purple','indigo','mediumslateblue','cornflowerblue','powderblue','cyan','teal','limegreen','olive','gold','darkorange']
+
+loc_colours = ['mediumvioletred','deeppink','indigo','mediumslateblue','steelblue','deepskyblue','teal','mediumturquoise','darkgreen','limegreen','olivedrab','yellowgreen','darkorange','gold','firebrick','lightcoral']
+locations = [f'{loc}_L' if idx < dim/2 else f'{loc}_R' for idx, loc in enumerate(locations)]
+
+
+unique_locations = sorted(set(locations))
 
 # func_loc_colours = ['fuchsia','purple','cornflowerblue','teal','limegreen','gold','darkorange']
 
-locations = [f'{loc}_L' if idx < dim/2 else f'{loc}_R' for idx, loc in enumerate(locations)]
 
+node_color = [loc_colours[unique_locations.index(loc)] for loc in locations]
 # ---- get disconnectomes and behaviour (aligned, clean subjects only) ---- #
 
 subject_list_clean = []
@@ -130,8 +136,8 @@ plt.show()
 
 real_results = fit_nested_sbm_layered(
     graph,
-    mcmc_samples=10000,
-    burn_in=100,
+    mcmc_samples=1000,
+    burn_in=10,
     annealing_temps=(1, 5),
     annealing_steps=1
 )
@@ -141,6 +147,7 @@ edge_var = real_results['edge_prob_var']   # (n_nodes x n_nodes) posterior varia
 # ---- Print hierarchical structure ---- #
 state_nested = real_results['state']
 g = state_nested.g
+
 
 print(f"\nDetected {real_results['n_blocks_level_0']} communities at level 0")
 print(f"Total model entropy: {real_results['entropy']:.2f}")
@@ -174,11 +181,101 @@ plt.savefig(f'/mnt/h/RT/data/figures/RF_weighted_nested_entropy_trajectory_50_{s
 print(f"\nEntropy trajectory saved to: /mnt/h/RT/data/figures/RF_weighted_nested_entropy_trajectory_50_{score}.png")
 plt.show()
 
+
+# # ---- Visualization of nested block structure ---- #
+# print("\nGenerating nested block structure visualization...")
+
+# # Compute layout on the weighted graph
+# pos = gt.sfdp_layout(g, cooling_step=0.99, epsilon=1e-3, max_iter=100)
+
+# # Extract unique location names (without _L/_R suffix)
+# unique_location_names = sorted(set([loc.rsplit('_', 1)[0] for loc in locations]))
+# unique_location_names = sorted(set(locations))
+# location_name_to_idx = {name: idx for idx, name in enumerate(unique_location_names)}
+# n_locations = len(unique_location_names)
+
+# # Convert func_loc_colours (named colors) to RGB tuples
+# from matplotlib.colors import to_rgba
+# distinct_colors = [to_rgba(color) for color in loc_colours]
+
+# # Create a custom colormap from these distinct colors
+# from matplotlib.colors import ListedColormap
+# cmap = ListedColormap(distinct_colors)
+# norm = Normalize(vmin=0, vmax=max(n_locations - 1, 1))
+
+# vertex_color = g.new_vertex_property("vector<double>")
+# vertex_shape = g.new_vertex_property("int")  # 0=circle, 1=triangle
+# for v in g.vertices():
+#     node_idx = int(v)
+#     location = locations[node_idx]
+#     # Extract location name (remove _L/_R suffix)
+#     location_name = location#.rsplit('_', 1)[0]
+#     side = location.rsplit('_', 1)[1]  # 'L' or 'R'
+#     location_idx = location_name_to_idx[location_name]
+#     rgba = cmap(norm(location_idx))
+#     vertex_color[v] = rgba
+#     # Set shape: 0 for circle (left), 1 for triangle (right)
+#     vertex_shape[v] = 0 if side == 'L' else 1
+
+# # Compute node sizes based on degree
+# degree_map = g.degree_property_map("in")  # Get degree property map
+# vertex_sizes = gt.prop_to_size(degree_map, 
+#                                mi=20, 
+#                                ma=50)  # Node size range: 20 to 50 points
+
+# # Precompute edge alpha from posterior variance: low variance → high alpha
+# # Exponential rescaling heavily favours certain edges; k controls steepness
+# edge_vars = np.array([
+#     edge_var[int(e.source()), int(e.target())] for e in g.edges()
+# ])
+# var_nonzero = edge_vars[edge_vars > 0]
+# k = np.log(100) / np.percentile(var_nonzero, 10) if var_nonzero.size > 0 else 1.0
+# # k is set so that edges at the 10th percentile of variance already have alpha ~0.01
+
+# edge_alpha = np.exp(-k * edge_vars)          # [0, 1]: 1 = most certain
+# edge_alpha = np.clip(edge_alpha, 0.01, 1.0)  # floor to keep all edges visible if desired
+
+# # Create edge colors matching the node color gradient, alpha from variance
+# edge_color = g.new_edge_property("vector<double>")
+
+# for idx, e in enumerate(g.edges()):
+#     src_color = vertex_color[e.source()]
+#     tgt_color = vertex_color[e.target()]
+#     avg_color = [(src_color[c] + tgt_color[c]) / 2 for c in range(3)]
+#     avg_color.append(float(edge_alpha[idx]))
+#     edge_color[e] = tuple(avg_color)
+
+# # Draw using state_nested.draw() to show hierarchical layout
+# state_nested.draw(
+#     pos=pos,
+#     vertex_fill_color=vertex_color,
+#     vertex_shape=vertex_shape,  # Circle for left, triangle for right
+#     vertex_size=vertex_sizes,  # Size based on node degree
+#     vertex_pen_width=0.5,  # Thin outline
+#     edge_color=edge_color,  # Match node color gradient
+#     edge_pen_width=gt.prop_to_size(g.ep.behaviour_weight,
+#                                    mi=0.5,
+#                                    ma=3),  # Edge width based on behaviour_weight
+#     edge_gradient=[],
+#     vertex_text=g.vp.label,
+#     vertex_text_color='black',
+#     vertex_text_position=0,
+#     vertex_font_size=10,
+#     output=f"/mnt/h/RT/data/figures/RF_weighted_nested_block_state_draw_{score}.png",
+#     output_size=(1200, 1200)
+# )
+# print(f"Nested block state visualization saved to: /mnt/h/RT/data/figures/RF_weighted_nested_block_state_draw_{score}.png")
+
+
 # ---- Visualization of nested block structure ---- #
 print("\nGenerating nested block structure visualization...")
 
-# Compute layout on the weighted graph
-pos = gt.sfdp_layout(g, cooling_step=0.99, epsilon=1e-3, max_iter=100)
+# Load anatomical circle coordinates as node positions
+_coord_data = np.loadtxt(os.path.join(path, 'circle_coords_360_sorted.txt'),
+                         delimiter='\t', skiprows=1, usecols=(0, 1))
+pos = g.new_vertex_property("vector<double>")
+for v in g.vertices():
+    pos[v] = _coord_data[int(v)].tolist()
 
 # Extract unique location names (without _L/_R suffix)
 unique_location_names = sorted(set([loc.rsplit('_', 1)[0] for loc in locations]))
@@ -202,12 +299,12 @@ for v in g.vertices():
     location = locations[node_idx]
     # Extract location name (remove _L/_R suffix)
     location_name = location#.rsplit('_', 1)[0]
-    # side = location.rsplit('_', 1)[1]  # 'L' or 'R'
+    side = location.rsplit('_', 1)[1]  # 'L' or 'R'
     location_idx = location_name_to_idx[location_name]
     rgba = cmap(norm(location_idx))
     vertex_color[v] = rgba
     # Set shape: 0 for circle (left), 1 for triangle (right)
-    # vertex_shape[v] = 0 if side == 'L' else 1
+    vertex_shape[v] = 0 if side == 'L' else 1
 
 # Compute node sizes based on degree
 degree_map = g.degree_property_map("in")  # Get degree property map
@@ -215,20 +312,26 @@ vertex_sizes = gt.prop_to_size(degree_map,
                                mi=20, 
                                ma=50)  # Node size range: 20 to 50 points
 
-# Create edge colors matching the node color gradient
+# Precompute edge alpha from posterior variance: low variance → high alpha
+# Exponential rescaling heavily favours certain edges; k controls steepness
+edge_vars = np.array([
+    edge_var[int(e.source()), int(e.target())] for e in g.edges()
+])
+var_nonzero = edge_vars[edge_vars > 0]
+k = np.log(100) / np.percentile(var_nonzero, 10) if var_nonzero.size > 0 else 1.0
+# k is set so that edges at the 10th percentile of variance already have alpha ~0.01
+
+edge_alpha = np.exp(-k * edge_vars)          # [0, 1]: 1 = most certain
+edge_alpha = np.clip(edge_alpha, 0.01, 1.0)  # floor to keep all edges visible if desired
+
+# Create edge colors matching the node color gradient, alpha from variance
 edge_color = g.new_edge_property("vector<double>")
 
-for e in g.edges():
-    # Get colors of the source and target nodes
+for idx, e in enumerate(g.edges()):
     src_color = vertex_color[e.source()]
     tgt_color = vertex_color[e.target()]
-    
-    # Average the colors of the two endpoints (RGB only)
-    avg_color = list((src_color[i] + tgt_color[i]) / 2 for i in range(3))
-    
-    # Add transparency (alpha = 0.4 for semi-transparent edges)
-    avg_color.append(0.4)
-    
+    avg_color = [(src_color[c] + tgt_color[c]) / 2 for c in range(3)]
+    avg_color.append(float(edge_alpha[idx]))
     edge_color[e] = tuple(avg_color)
 
 # Draw using state_nested.draw() to show hierarchical layout
@@ -293,3 +396,108 @@ plt.show()
 #     nodes_in_location_r = np.where(np.array(locations) == f'{location_name}_R')[0]
 #     print(f"  {location_name}_L: {len(nodes_in_location_l)} nodes (circles)")
 #     print(f"  {location_name}_R: {len(nodes_in_location_r)} nodes (triangles)")
+
+def draw_curved_line(x1, y1, x2, y2, ax, color='blue', color2=None, alpha=0.3, curve_factor=0.5, center=(0,0)):
+    """Draw a curved Bézier line between two points with an optional colour gradient."""
+    from matplotlib.colors import to_rgba
+    from matplotlib.collections import LineCollection
+
+    cx, cy = center
+    t = np.linspace(0, 1, 100)
+    x_curve = (1-t)**2 * x1 + 2*(1-t)*t * (cx * curve_factor) + t**2 * x2
+    y_curve = (1-t)**2 * y1 + 2*(1-t)*t * (cy * curve_factor) + t**2 * y2
+
+    if color2 is None:
+        ax.plot(x_curve, y_curve, color=color, alpha=alpha, linewidth=1)
+        return
+
+    c1 = np.array(to_rgba(color))
+    c2 = np.array(to_rgba(color2))
+    # interpolate colour along the curve
+    colors = (1 - t[:, None]) * c1 + t[:, None] * c2
+    colors[:, 3] = alpha  # override alpha uniformly
+
+    points = np.stack([x_curve, y_curve], axis=1)
+    segments = np.stack([points[:-1], points[1:]], axis=1)
+    lc = LineCollection(segments, colors=colors[:-1], linewidth=1)
+    ax.add_collection(lc)
+
+
+def plot_disconnectome(adj_matrix, coords, title='Disconnectome', cmap = 'plasma', node_colours = None, lobes=None, save_path=None):
+    """
+    Plot disconnectome given adjacency matrix and coordinates.
+    
+    Args:
+        adj_matrix: Adjacency matrix (numpy array)
+        coords: List of (x,y,z) coordinates for each node
+        title: Title of the plot
+        cmap: Colormap to use
+        node_colours: List of colors for nodes
+        lobes: List of lobe/region names corresponding to nodes (for legend)
+        save_path: If provided, save the plot to this path
+    """
+    if not lobes:
+        fig = plt.figure(figsize=(10,10))
+    else:
+        fig = plt.figure(figsize=(12,10))
+    ax = fig.add_subplot(111)
+    # ax.set_facecolor('#F1EAEF')
+    # cmap = plt.get_cmap('Purples')
+    # Plot nodes
+    x, y = coords[:,0], coords[:,1]
+    if node_colours is None:
+        ax.scatter(x, y, s=75, c='deeppink', alpha=0.75)
+    else:
+        # ax.scatter(x, y, s=50, c=node_colours, edgecolors='#240E3C', alpha=1)
+        ax.scatter(x, y, s=125, c=node_colours, edgecolors='white', alpha=1, linewidth=3)
+
+    # Plot edges
+    num_nodes = adj_matrix.shape[0]-4
+    color_counter = 0
+    for i in range(num_nodes):
+        for j in range(i+1, num_nodes):
+            if adj_matrix[i, j] > 0:
+                color_id = (color_counter / adj_matrix.sum()) * 256
+                draw_curved_line(coords[i][0], coords[i][1], coords[j][0], coords[j][1], ax,
+                                 color=node_colours[i], color2=node_colours[j], alpha=0.25, center=(0,0))
+                # draw_curved_line(coords[i][0], coords[i][1], coords[j][0], coords[j][1], ax, color=get_color_from_scaled_colormap(color_id, adj_matrix.sum(), cmap), alpha=0.25, center=(0,0))
+
+                color_counter += 1
+    
+    # Add legend if lobes are provided
+    if lobes is not None:
+        import matplotlib.patches as mpatches
+        # Get unique lobes while preserving order
+        unique_lobes = []
+        for lobe in lobes:
+            if lobe not in unique_lobes:
+                unique_lobes.append(lobe)
+        
+        # Create legend patches with corresponding colors
+        legend_patches = []
+        for idx, lobe in enumerate(unique_lobes):
+            color = node_colours[lobes.index(lobe)]
+            legend_patches.append(mpatches.Patch(color=color, label=lobe))
+        
+        ax.legend(handles=legend_patches, loc='upper left', bbox_to_anchor=(1.05, 1), frameon=True, fontsize=10)
+    
+    ax.set_title(title)
+    plt.tight_layout()
+    plt.savefig(save_path) if save_path else plt.show()
+    plt.close()
+
+
+
+
+coords =  np.genfromtxt(os.path.join(path,  f'circle_coords_360_sorted.txt'), dtype=np.float32, usecols=(0, 1))
+
+
+
+tmp = edge_var.copy()
+tmp = np.where(edge_var<np.percentile(edge_var[edge_var>0], 10), 0, edge_var)
+
+
+plot_disconnectome(tmp,coords[1:,:2].astype(float),node_colours=node_color, lobes = locations, save_path=f'/mnt/h/RT/data/figures/SBM_certain_edges_{score}.svg', title = f'MCMC fitted SBM top10% certain edges')
+
+
+
