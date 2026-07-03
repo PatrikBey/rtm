@@ -24,7 +24,7 @@
 import numpy as np
 import graph_tool.all as gt
 from graph_tool import inference
-from tqdm import tqdm
+from utils import log_msg
 
 
 
@@ -220,25 +220,28 @@ def fit_nested_sbm_layered(graph,
     )
 
     # Annealing
-    for temp in tqdm(np.linspace(annealing_temps[1], annealing_temps[0], annealing_steps),
-                     desc='Annealing', unit='step', leave=False):
+    log_msg('| UPDATE | starting annealing')
+    for temp in np.linspace(annealing_temps[1], annealing_temps[0], annealing_steps):
         state.mcmc_sweep(niter=10, beta=1.0 / temp)
+    log_msg('| UPDATE | annealing complete')
 
     # Burn-in
-    for _ in tqdm(range(burn_in), desc='Burn-in', unit='iter', leave=False):
+    log_msg('| UPDATE | starting burn-in')
+    for _ in range(burn_in):
         state.mcmc_sweep(niter=1)
+    log_msg('| UPDATE | burn-in complete')
 
     n_verts = g.num_vertices()
 
     # ---- Phase 1: entropy tracking only ---- #
     dS = np.zeros(mcmc_samples)
-    with tqdm(total=mcmc_samples, desc='Phase 1 (MCMC)', unit='iter') as pbar:
-        for i in range(mcmc_samples):
-            state.mcmc_sweep(niter=1)
-            dS[i] = state.entropy()
-            if i % 100 == 0:
-                pbar.set_postfix(DL=f'{dS[i]:.1f}')
-            pbar.update(1)
+    log_msg('| UPDATE | starting phase 1 mcmc')
+    _step1 = max(1, mcmc_samples // 10)
+    for i in range(mcmc_samples):
+        state.mcmc_sweep(niter=1)
+        dS[i] = state.entropy()
+        if (i + 1) % _step1 == 0:
+            log_msg(f'| UPDATE | finished {(i + 1) * 100 // mcmc_samples}% of mcmc iterations')
 
     # ---- Convergence threshold ---- #
     total_reduction = dS[0] - dS.min()
@@ -280,38 +283,38 @@ def fit_nested_sbm_layered(graph,
     edge_M2 = np.zeros((n_verts, n_verts))   # running sum of squares
 
     dS_converged = np.zeros(n_converged)
-    with tqdm(total=n_converged, desc='Phase 2 (accumulation)', unit='iter') as pbar:
-        for i in range(n_converged):
-            state.mcmc_sweep(niter=1)
-            dS_converged[i] = state.entropy()
+    log_msg('| UPDATE | starting phase 2 accumulation')
+    _step2 = max(1, n_converged // 10)
+    for i in range(n_converged):
+        state.mcmc_sweep(niter=1)
+        dS_converged[i] = state.entropy()
 
-            # Level-0 state: block assignments and joint mrs
-            lv0          = state.get_levels()[0]
-            b0_arr       = lv0.get_blocks().a.copy()
-            mrs0_sparse  = lv0.get_matrix()
-            mrs0_arr     = mrs0_sparse.toarray().astype(float) \
-                           if hasattr(mrs0_sparse, 'toarray') \
-                           else np.array(mrs0_sparse, dtype=float)
-            b0_history.append(b0_arr)
-            mrs0_history.append(mrs0_arr)
+        # Level-0 state: block assignments and joint mrs
+        lv0          = state.get_levels()[0]
+        b0_arr       = lv0.get_blocks().a.copy()
+        mrs0_sparse  = lv0.get_matrix()
+        mrs0_arr     = mrs0_sparse.toarray().astype(float) \
+                       if hasattr(mrs0_sparse, 'toarray') \
+                       else np.array(mrs0_sparse, dtype=float)
+        b0_history.append(b0_arr)
+        mrs0_history.append(mrs0_arr)
 
-            # Accumulate mrs[b_i, b_j] for every node pair (vectorised)
-            B0_size = mrs0_arr.shape[0]
-            b_clip  = np.minimum(b0_arr, B0_size - 1).astype(int)
-            vals    = mrs0_arr[np.ix_(b_clip, b_clip)]
-            edge_M1 += vals
-            edge_M2 += vals ** 2
+        # Accumulate mrs[b_i, b_j] for every node pair (vectorised)
+        B0_size = mrs0_arr.shape[0]
+        b_clip  = np.minimum(b0_arr, B0_size - 1).astype(int)
+        vals    = mrs0_arr[np.ix_(b_clip, b_clip)]
+        edge_M1 += vals
+        edge_M2 += vals ** 2
 
-            # Projected node-level assignments for each meaningful level
-            for k in meaningful_levels:
-                proj  = state.project_partition(k, 0)
-                b_arr = proj.a.copy() if hasattr(proj, 'a') else \
-                        np.array([proj[v] for v in g.vertices()])
-                b_history[k].append(b_arr)
+        # Projected node-level assignments for each meaningful level
+        for k in meaningful_levels:
+            proj  = state.project_partition(k, 0)
+            b_arr = proj.a.copy() if hasattr(proj, 'a') else \
+                    np.array([proj[v] for v in g.vertices()])
+            b_history[k].append(b_arr)
 
-            if i % 100 == 0:
-                pbar.set_postfix(DL=f'{dS_converged[i]:.1f}')
-            pbar.update(1)
+        if (i + 1) % _step2 == 0:
+            log_msg(f'| UPDATE | finished {(i + 1) * 100 // n_converged}% of mcmc iterations')
 
     edge_mean = edge_M1 / n_converged
     edge_var  = np.maximum(edge_M2 / n_converged - edge_mean ** 2, 0.0)
@@ -386,7 +389,9 @@ def fit_nested_sbm_layered(graph,
 
     block_connectivity = {}
     for k in meaningful_levels:
+        log_msg(f'| UPDATE | aggregating mrs to level {k}')
         block_connectivity[k] = _aggregate_mrs_to_level(k, modal_assignments[k])
+        log_msg(f'| UPDATE | finished aggregating mrs to level {k}')
 
     # ---- Compile results ---- #
     _levels_final = state.get_levels()

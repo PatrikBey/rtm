@@ -48,13 +48,13 @@ from utils import load_graphs, log_msg, get_graph_layers
 #################################
 
 args = argparse.ArgumentParser(description='Run multi-layer nested SBM on disconnectome data.')
-args.add_argument('--data_path', type=str, default='/mnt/h/RT/data', help='Path to the data directory')
+args.add_argument('--data_path', type=str, default='/data/patrik/RT/DATA', help='Path to the data directory')
 args.add_argument('--score', type=str, default='Foreperiod_Long_tau', help='Behaviour score to analyze')
 args.add_argument('--atlas', type=str, default='HCP-MMP1', help='Atlas name')
 args.add_argument('--mcmc_samples', type=int, default=50000, help='Number of MCMC samples for fitting the SBM')
-args.add_argument('--burn_in', type=int, default=100, help='Number of burn-in iterations for MCMC')
+args.add_argument('--burn_in', type=int, default=10, help='Number of burn-in iterations for MCMC')
 args.add_argument('--annealing_temps', type=float, nargs=2, default=(1, 5), help='Annealing temperatures for MCMC')
-args.add_argument('--annealing_steps', type=int, default=1, help='Number of annealing steps for MCMC')
+args.add_argument('--annealing_steps', type=int, default=1, help='Number of annealing steps for CMC')
 args.add_argument('--convergence_fraction', type=float, default=0.05,
                   help='Fraction of total entropy reduction used to define convergence threshold. '
                        'Only MCMC iterations in the converged tail (remaining reduction <= this '
@@ -66,10 +66,12 @@ log_msg(f"| UPDATE | Data path: {args.data_path}")
 log_msg(f"| UPDATE | Behaviour score: {args.score}")
 
 output_dir = os.path.join(args.data_path, 'RESULTS', f'SBM_{args.atlas}_{args.score}')
-try:
-    os.makedirs(output_dir, exist_ok=True)
-except FileExistsError:
-    pass  # WSL/NTFS can raise EEXIST spuriously
+
+# try:
+#     os.makedirs(output_dir, exist_ok=True)
+# except FileExistsError:
+#     pass  # WSL/NTFS can raise EEXIST spuriously
+
 if not os.path.isdir(output_dir):
     os.mkdir(output_dir)
 
@@ -90,8 +92,7 @@ locations  = np.genfromtxt(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_
                            dtype=str, delimiter='\t')[1:, 2].tolist()
 dim = len(node_names)
 
-subject_list_clean, behaviour, adj_matrices, subjects_missing_score, empty_subjects = \
-    load_graphs(args.data_path, args.atlas, subject_list, part, score_col)
+subject_list_clean, behaviour, adj_matrices, subjects_missing_score, empty_subjects = load_graphs(args.data_path, args.atlas, subject_list, part, score_col)
 
 log_msg(f"| UPDATE | Total subjects: {len(subject_list)}")
 log_msg(f"| UPDATE | Included: {len(subject_list_clean)}")
@@ -275,7 +276,6 @@ for level_idx in meaningful_levels:
     bmat = block_connectivity[level_idx]
     b    = modal_assignments[level_idx]
     n_b  = int(b.max()) + 1
-
     fig, ax = plt.subplots(figsize=(7, 6))
     im = ax.imshow(np.where(bmat == 0, np.nan, bmat), cmap='plasma', interpolation='nearest')
     plt.colorbar(im, ax=ax, label='Mean block-to-block edge count (mrs)')
@@ -284,11 +284,10 @@ for level_idx in meaningful_levels:
     ax.set_ylabel('Block index')
     ax.set_xticks(range(n_b))
     ax.set_yticks(range(n_b))
-
     plt.suptitle(f'Block Connectivity — Level {level_idx} Modal Partition  |  {args.score}',
                  fontsize=12, fontweight='bold')
     plt.tight_layout()
-    plt.savefig(f'{args.data_path}/figures/SBM_block_matrix_level{level_idx}_{args.score}.png',
+    plt.savefig(f'{output_dir}/SBM_block_matrix_level{level_idx}_{args.score}.png',
                 dpi=150, bbox_inches='tight')
     log_msg(f"| UPDATE | Block matrix saved for level {level_idx}")
     plt.close()
@@ -297,8 +296,10 @@ for level_idx in meaningful_levels:
 # ---- Graph visualisation (graph_tool draw, level-0 modal partition) ---- #
 print("\nGenerating graph visualisation...")
 
-_coord_data = np.loadtxt(os.path.join(args.data_path, 'circle_coords_360_sorted.txt'),
+_coord_data = np.loadtxt(os.path.join(args.data_path, 'ATLAS', 'circle_coords_360_sorted.txt'),
                          delimiter='\t', skiprows=1, usecols=(0, 1))
+
+
 pos = g.new_vertex_property("vector<double>")
 for v in g.vertices():
     pos[v] = _coord_data[int(v)].tolist()
@@ -376,6 +377,7 @@ for loc_idx, location_name in enumerate(unique_location_names):
                markeredgecolor='black', markeredgewidth=1.5,
                label=f"{location_name} ({n_node} nodes)")
     )
+
 ax.legend(handles=legend_elements, loc='center', fontsize=10, frameon=True,
           title="Node colour by location (circles=L, triangles=R)",
           title_fontsize=12, ncol=2, fancybox=True, shadow=True)
@@ -399,7 +401,7 @@ plt.close()
 #                  block (majority-vote mapping over member nodes).
 
 outer_coord_data = np.loadtxt(
-    os.path.join(args.data_path, 'circle_coords_360_sorted.txt'),
+    os.path.join(args.data_path,'ATLAS', 'circle_coords_360_sorted.txt'),
     delimiter='\t', skiprows=1, usecols=(0, 1)
 ).astype(float)
 
@@ -469,10 +471,8 @@ for blk_feat in range(n_b0):
     ax = axes_flat[blk_feat]
     ax.set_aspect('equal')
     ax.axis('off')
-
     members     = np.where(b0 == blk_feat)[0]
     non_members = np.where(b0 != blk_feat)[0]
-
     # ---- Spokes: outer node → its level-0 block node ---- #
     # Alpha = posterior marginal probability of modal block assignment.
     # Consistent members are opaque; ambiguous nodes are transparent.
@@ -482,27 +482,22 @@ for blk_feat in range(n_b0):
         cpx, cpy  = ctrl_xy[blk_feat]
         alpha_node = float(_alpha_min + (1.0 - _alpha_min) *
                            (_cons0[node_idx] - _cons_min) / _cons_range)
-
         xc = (1 - t_bez)**2 * x1 + 2*(1 - t_bez)*t_bez * cpx + t_bez**2 * x2
         yc = (1 - t_bez)**2 * y1 + 2*(1 - t_bez)*t_bez * cpy + t_bez**2 * y2
-
         ax.plot(xc, yc, color=node_color[node_idx],
                 alpha=alpha_node, linewidth=0.7, zorder=2)
-
     # ---- Middle→inner edges: shown in every subplot ---- #
     for blk0 in range(n_b0):
         blk1 = int(b0_to_b1[blk0])
         ax.plot([middle_xy[blk0, 0], inner_xy[blk1, 0]],
                 [middle_xy[blk0, 1], inner_xy[blk1, 1]],
                 color='dimgray', alpha=0.5, linewidth=1.5, zorder=3)
-
     # ---- Inner ring: level-1 block nodes ---- #
     ax.scatter(inner_xy[:, 0], inner_xy[:, 1],
                s=150, c='white', edgecolors='dimgray', linewidths=1.5, zorder=4)
     for b in range(n_b1):
         ax.text(inner_xy[b, 0], inner_xy[b, 1], str(b),
                 ha='center', va='center', fontsize=8, fontweight='bold', zorder=5)
-
     # ---- Middle ring: level-0 block nodes (featured block highlighted) ---- #
     c_mid  = ['gold' if b == blk_feat else 'white' for b in range(n_b0)]
     lw_mid = [2.5   if b == blk_feat else 1.5     for b in range(n_b0)]
@@ -511,19 +506,16 @@ for blk_feat in range(n_b0):
     for b in range(n_b0):
         ax.text(middle_xy[b, 0], middle_xy[b, 1], str(b),
                 ha='center', va='center', fontsize=8, fontweight='bold', zorder=7)
-
     # ---- Outer nodes: non-members grayed, members colored by location ---- #
     # Member node alpha matches spoke alpha (normalised consistency score).
     nm_L = [i for i in non_members if locations[i].endswith('_L')]
     nm_R = [i for i in non_members if locations[i].endswith('_R')]
     m_L  = [i for i in members     if locations[i].endswith('_L')]
     m_R  = [i for i in members     if locations[i].endswith('_R')]
-
     def _node_rgba(node_idx):
         a   = _alpha_min + (1.0 - _alpha_min) * (_cons0[node_idx] - _cons_min) / _cons_range
         r, g, b, _ = to_rgba(node_color[node_idx])
         return (r, g, b, float(a))
-
     if nm_L:
         ax.scatter(outer_coord_data[nm_L, 0], outer_coord_data[nm_L, 1],
                    s=20, c='lightgray', marker='o', edgecolors='none',
@@ -540,7 +532,6 @@ for blk_feat in range(n_b0):
         ax.scatter(outer_coord_data[m_R, 0], outer_coord_data[m_R, 1],
                    s=80, c=[_node_rgba(i) for i in m_R],
                    marker='^', edgecolors='none', zorder=8)
-
     ax.set_title(f'Block {blk_feat}  ({len(members)} nodes)',
                  fontsize=10, fontweight='bold')
 
@@ -576,36 +567,28 @@ atlas_data     = np.asarray(atlas_img.dataobj, dtype=np.int32)
 for level_idx in meaningful_levels:
     b_level  = modal_assignments[level_idx]
     n_blocks = int(b_level.max()) + 1
-
     # One NIfTI + txt mapping per block
     for blk in range(n_blocks):
         nodes_in_block = np.where(b_level == blk)[0]
         if len(nodes_in_block) == 0:
             continue
-
         block_data    = np.zeros_like(atlas_data, dtype=np.int32)
         mapping_lines = []
-
         for region_idx, node_idx in enumerate(nodes_in_block):
             parcel_val = node_idx + 1       # 1-indexed parcel code in atlas NIfTI
             region_num = region_idx + 1     # 1-indexed label within this block
             block_data[atlas_data == parcel_val] = region_num
             mapping_lines.append(f"{region_num}\t{node_names[node_idx]}\t{locations[node_idx]}")
-
         nii_path = os.path.join(output_dir,
                                 f'{args.atlas}_lvl{level_idx}_block{blk}_{args.score}.nii.gz')
         txt_path = os.path.join(output_dir,
                                 f'{args.atlas}_lvl{level_idx}_block{blk}_{args.score}.txt')
-
         out_img = nib.Nifti1Image(block_data, atlas_img.affine, atlas_img.header)
         nib.save(out_img, nii_path)
-
         with open(txt_path, 'w') as fh:
             fh.write('\n'.join(mapping_lines) + '\n')
-
         log_msg(f"| UPDATE | Block NIfTI saved: level {level_idx} block {blk} "
                 f"({len(nodes_in_block)} regions) → {nii_path}")
-
     # Block connectivity matrix — CSV
     bmat     = block_connectivity[level_idx]
     csv_path = os.path.join(output_dir,
