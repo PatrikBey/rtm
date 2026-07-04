@@ -51,7 +51,7 @@ args = argparse.ArgumentParser(description='Run multi-layer nested SBM on discon
 args.add_argument('--data_path', type=str, default='/mnt/h/RT/data', help='Path to the data directory')
 # args.add_argument('--data_path', type=str, default='/data/patrik/RT/DATA', help='Path to the data directory')
 args.add_argument('--score', type=str, default='Foreperiod_Long_tau', help='Behaviour score to analyze')
-args.add_argument('--atlas', type=str, default='HCP-MMP1', help='Atlas name')
+args.add_argument('--atlas', type=str, default='Schaefer2018-400', help='Atlas name')
 args.add_argument('--max_iter', type=int, default=10000,
                   help='Maximum MCMC sweeps for change-point detection (default: 10000)')
 args.add_argument('--window_size', type=int, default=250,
@@ -95,10 +95,12 @@ part = np.genfromtxt(os.path.join(args.data_path, 'participants.tsv'), dtype=str
 score_col = np.where(part[0] == args.score)[0][0]
 
 # ---- graph nodes ---- #
+atlas_meta = np.genfromtxt(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_areas.txt'),
+                           dtype=str, delimiter='\t')[0, :].tolist()
 node_names = np.genfromtxt(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_areas.txt'),
-                           dtype=str, delimiter='\t')[1:, 0].tolist()
+                           dtype=str, delimiter='\t')[1:, atlas_meta.index('label')].tolist()
 locations  = np.genfromtxt(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_areas.txt'),
-                           dtype=str, delimiter='\t')[1:, 2].tolist()
+                           dtype=str, delimiter='\t')[1:, atlas_meta.index('region')].tolist()
 dim = len(node_names)
 
 subject_list_clean, behaviour, adj_matrices, subjects_missing_score, empty_subjects = load_graphs(args.data_path, args.atlas, subject_list, part, score_col)
