@@ -38,7 +38,7 @@ from matplotlib.collections import LineCollection
 import numpy as np
 import nibabel as nib
 from functions import create_multilayer_graph
-from functions import fit_nested_sbm_layered
+from functions import fit_nested_sbm_layered, fit_nested_sbm_layered_multiflip
 from utils import load_graphs, log_msg, get_graph_layers
 
 
@@ -48,17 +48,26 @@ from utils import load_graphs, log_msg, get_graph_layers
 #################################
 
 args = argparse.ArgumentParser(description='Run multi-layer nested SBM on disconnectome data.')
-args.add_argument('--data_path', type=str, default='/data/patrik/RT/DATA', help='Path to the data directory')
+args.add_argument('--data_path', type=str, default='/mnt/h/RT/data', help='Path to the data directory')
+# args.add_argument('--data_path', type=str, default='/data/patrik/RT/DATA', help='Path to the data directory')
 args.add_argument('--score', type=str, default='Foreperiod_Long_tau', help='Behaviour score to analyze')
 args.add_argument('--atlas', type=str, default='HCP-MMP1', help='Atlas name')
-args.add_argument('--mcmc_samples', type=int, default=50000, help='Number of MCMC samples for fitting the SBM')
-args.add_argument('--burn_in', type=int, default=10, help='Number of burn-in iterations for MCMC')
-args.add_argument('--annealing_temps', type=float, nargs=2, default=(1, 5), help='Annealing temperatures for MCMC')
-args.add_argument('--annealing_steps', type=int, default=1, help='Number of annealing steps for CMC')
-args.add_argument('--convergence_fraction', type=float, default=0.05,
-                  help='Fraction of total entropy reduction used to define convergence threshold. '
-                       'Only MCMC iterations in the converged tail (remaining reduction <= this '
-                       'fraction of total) are used for partition accumulation (default: 0.05)')
+args.add_argument('--max_iter', type=int, default=10000,
+                  help='Maximum MCMC sweeps for change-point detection (default: 10000)')
+args.add_argument('--window_size', type=int, default=250,
+                  help='Window size for change-point detection and accumulation (default: 250)')
+args.add_argument('--shift_factor', type=float, default=0.25,
+                  help='Mean-shift threshold: change point when sliding window mean drops '
+                       'below first_window_mean - shift_factor * first_window_std (default: 0.5)')
+args.add_argument('--multiflip', action='store_true', default=False,
+                  help='Use multiflip_mcmc_sweep instead of mcmc_sweep (better local-minima escape)')
+args.add_argument('--behaviour_dist', type=str, default='normal',
+                  choices=['normal', 'poisson'],
+                  help='Assumed distribution for the behaviour layer (default: normal)')
+args.add_argument('--cooccurrence_dist', type=str, default='poisson',
+                  choices=['normal', 'poisson'],
+                  help='Assumed distribution for the cooccurrence layer (default: poisson). '
+                       'Set to normal to rescale to [0,1] and equalise layer influence.')
 args = args.parse_args()
 
 log_msg(f"| START | Running multi-layer nested SBM on disconnectome data")
@@ -105,7 +114,9 @@ log_msg(f"| UPDATE | Empty disconnectome: {len(empty_subjects)}")
 #         BUILD GRAPH           #
 #################################
 
-graph = create_multilayer_graph(adj_matrices, behaviour, node_names, edge_threshold=25)
+graph = create_multilayer_graph(adj_matrices, behaviour, node_names, edge_threshold=50,
+                               behaviour_dist=args.behaviour_dist,
+                               cooccurrence_dist=args.cooccurrence_dist)
 occ_layer, beh_layer = get_graph_layers(graph)
 
 plt.figure(figsize=(8, 5))
@@ -129,14 +140,24 @@ plt.close()
 #          FIT MODEL            #
 #################################
 
-real_results = fit_nested_sbm_layered(
-    graph,
-    mcmc_samples=args.mcmc_samples,
-    burn_in=args.burn_in,
-    annealing_temps=(args.annealing_temps[0], args.annealing_temps[1]),
-    annealing_steps=args.annealing_steps,
-    convergence_fraction=args.convergence_fraction
-)
+if args.multiflip:
+    real_results = fit_nested_sbm_layered_multiflip(
+        graph,
+        max_iter=args.max_iter,
+        window_size=args.window_size,
+        shift_factor=args.shift_factor,
+        behaviour_dist=args.behaviour_dist,
+        cooccurrence_dist=args.cooccurrence_dist
+    )
+else:
+    real_results = fit_nested_sbm_layered(
+        graph,
+        max_iter=args.max_iter,
+        window_size=args.window_size,
+        shift_factor=args.shift_factor,
+        behaviour_dist=args.behaviour_dist,
+        cooccurrence_dist=args.cooccurrence_dist
+    )
 
 state_nested      = real_results['state']
 g                 = state_nested.g
@@ -154,8 +175,9 @@ node_consistency   = real_results['node_consistency']    # {level: (n_nodes,) ar
 log_msg(f"| UPDATE | Total model entropy: {real_results['entropy']:.2f}")
 log_msg(f"| UPDATE | Hierarchy levels: {real_results['n_levels']} total, "
         f"{len(meaningful_levels)} meaningful ({meaningful_levels})")
-log_msg(f"| UPDATE | Convergence at iteration {real_results['convergence_iteration']} "
-        f"({real_results['n_converged_samples']} accumulation samples)")
+log_msg(f"| UPDATE | Converged: {real_results['converged']} "
+        f"(iteration {real_results['convergence_iteration']}, "
+        f"{real_results['n_converged_samples']} accumulation samples)")
 
 # print(f"\nHierarchical Block Structure:")
 # for level_idx in range(real_results['n_levels']):
@@ -183,28 +205,37 @@ log_msg(f"| UPDATE | Convergence at iteration {real_results['convergence_iterati
 # --- Entropy / description length trajectory ---
 # In graph_tool, state.entropy() returns the description length (DL) directly —
 # the two quantities are identical in the MDL/Bayesian SBM formulation.
-# entropy_trajectory = DL at each Phase 1 iteration;
-# entropy_converged  = DL at each converged Phase 2 iteration.
+# entropy_trajectory = DL at each main-loop MCMC iteration;
+# entropy_converged  = DL across the fixed accumulation window.
 np.save(os.path.join(output_dir, f'entropy_trajectory_{args.score}.npy'),
         real_results['entropy_trajectory'])
 np.save(os.path.join(output_dir, f'entropy_converged_{args.score}.npy'),
         real_results['entropy_converged'])
 log_msg(f"| UPDATE | Entropy / DL trajectory saved "
-        f"({len(real_results['entropy_trajectory'])} Phase-1 + "
-        f"{len(real_results['entropy_converged'])} Phase-2 samples)")
+        f"({len(real_results['entropy_trajectory'])} MCMC iters + "
+        f"{len(real_results['entropy_converged'])} accumulation samples)")
 
 # --- ROI × level block-assignment table ---
 # Rows = ROIs, columns = meaningful level indices.
 # Values are 0-indexed block IDs from the modal partition.
+
+# Weighted degree in the behaviour layer (layer 0) per node.
+beh_degree = np.zeros(g.num_vertices())
+for e in g.edges():
+    if g.ep.layer[e] == 0:
+        w = g.ep.behaviour_weight[e]
+        beh_degree[int(e.source())] += w
+        beh_degree[int(e.target())] += w
+
 import csv
 roi_level_path = os.path.join(output_dir, f'roi_block_assignments_{args.score}.csv')
 level_cols     = [f'level_{k}' for k in meaningful_levels]
 with open(roi_level_path, 'w', newline='') as fh:
     writer = csv.writer(fh)
-    writer.writerow(['roi_index', 'roi_name'] + level_cols)
+    writer.writerow(['roi_index', 'roi_name', 'behaviour_degree'] + level_cols)
     for node_idx, roi_name in enumerate(node_names):
-        row = [node_idx, roi_name] + [int(modal_assignments[k][node_idx])
-                                       for k in meaningful_levels]
+        row = [node_idx, roi_name, round(float(beh_degree[node_idx]), 6)] + \
+              [int(modal_assignments[k][node_idx]) for k in meaningful_levels]
         writer.writerow(row)
 log_msg(f"| UPDATE | ROI block-assignment table saved ({len(node_names)} ROIs × "
         f"{len(meaningful_levels)} levels) → {roi_level_path}")
@@ -216,53 +247,65 @@ log_msg(f"| UPDATE | ROI block-assignment table saved ({len(node_names)} ROIs ×
 #################################
 
 # ---- Node colours by anatomical location ---- #
+# Locations are a fixed mapping from atlas ROIs to canonical anatomical areas —
+# consistent across atlases, so colours are hardcoded to those areas.
 loc_colours = [
     'mediumvioletred', 'deeppink', 'indigo', 'mediumslateblue', 'steelblue',
     'deepskyblue', 'teal', 'mediumturquoise', 'darkgreen', 'limegreen',
     'olivedrab', 'yellowgreen', 'darkorange', 'gold', 'firebrick', 'lightcoral'
 ]
-locations      = [f'{loc}_L' if idx < dim / 2 else f'{loc}_R'
-                  for idx, loc in enumerate(locations)]
+locations        = [f'{loc}_L' if idx < dim / 2 else f'{loc}_R'
+                    for idx, loc in enumerate(locations)]
 unique_locations = sorted(set(locations))
-node_color     = [loc_colours[unique_locations.index(loc)] for loc in locations]
+node_color       = [loc_colours[unique_locations.index(loc)] for loc in locations]
 
 
 # ---- Entropy trajectory ---- #
-t_star  = real_results['convergence_iteration']
-n_conv  = real_results['n_converged_samples']
-dS      = real_results['entropy_trajectory']
-dS_conv = real_results['entropy_converged']
+conv_iter    = real_results['convergence_iteration']
+n_conv       = real_results['n_converged_samples']
+converged    = real_results['converged']
+dS           = real_results['entropy_trajectory']
+dS_conv      = real_results['entropy_converged']
 
 fig, axes = plt.subplots(1, 2, figsize=(16, 5))
 
 ax = axes[0]
-ax.plot(dS, linewidth=1, alpha=0.7, color='steelblue', label='Phase 1 (tracking)')
-ax.axvline(t_star, color='firebrick', linewidth=1.5, linestyle='--',
-           label=f't* = {t_star}  ({args.convergence_fraction * 100:.0f}% threshold)')
-ax.axhspan(dS.min(), dS.min() + args.convergence_fraction * (dS[0] - dS.min()),
-           alpha=0.08, color='firebrick', label='Converged entropy band')
+ax.plot(dS, linewidth=1, alpha=0.7, color='steelblue', label='MCMC entropy')
+if converged:
+    ax.axvline(conv_iter, color='firebrick', linewidth=1.5, linestyle='--',
+               label=f'Mean-shift change point (iter {conv_iter})')
+    ax.axhline(real_results.get('threshold', np.nan), color='firebrick',
+               linewidth=1, linestyle=':', alpha=0.6, label='Shift threshold')
+else:
+    ax.axvline(len(dS) - 1, color='darkorange', linewidth=1.5, linestyle='--',
+               label=f'No shift detected within {args.max_iter} iter')
 ax.set_xlabel('MCMC Iteration', fontsize=11)
 ax.set_ylabel('Model Entropy (Description Length)', fontsize=11)
-ax.set_title('Phase 1: Entropy Tracking', fontsize=12, fontweight='bold')
+ax.set_title('Entropy Trajectory — Mean-Shift Detection', fontsize=12, fontweight='bold')
 ax.legend(fontsize=9)
 ax.grid(True, alpha=0.3)
 
 ax = axes[1]
 ax.plot(dS_conv, linewidth=1, alpha=0.8, color='seagreen',
-        label=f'Phase 2 ({n_conv} converged samples)')
-ax.set_ylim(dS.min(), dS.max())
-ax.set_xlabel('MCMC Iteration', fontsize=11)
+        label=f'Accumulation window ({n_conv} samples)')
+ax.set_xlabel('Accumulation Iteration', fontsize=11)
 ax.set_ylabel('Model Entropy (Description Length)', fontsize=11)
-ax.set_title('Phase 2: Converged Accumulation', fontsize=12, fontweight='bold')
+ax.set_title('Accumulation Window: Entropy', fontsize=12, fontweight='bold')
 ax.legend(fontsize=9)
 ax.grid(True, alpha=0.3)
+
+y_all = np.concatenate([dS, dS_conv])
+y_pad = (y_all.max() - y_all.min()) * 0.05
+for ax in axes:
+    ax.set_ylim(y_all.min() - y_pad, y_all.max() + y_pad)
 
 plt.suptitle('MCMC Entropy — Weighted Nested Hierarchical SBM',
              fontsize=13, fontweight='bold', y=1.01)
 plt.tight_layout()
-plt.savefig(os.path.join(output_dir, f'RF_weighted_nested_entropy_trajectory_50_{args.score}.png'),
+plt.savefig(os.path.join(output_dir, f'SBM_entropy_trajectory_{args.score}.png'),
             dpi=150, bbox_inches='tight')
-log_msg(f"| UPDATE | Entropy trajectory saved (t*={t_star}, {n_conv} accumulation samples)")
+log_msg(f"| UPDATE | Entropy trajectory saved "
+        f"(converged={converged}, iter={conv_iter}, {n_conv} accumulation samples)")
 plt.close()
 
 # plt.show()
@@ -296,7 +339,7 @@ for level_idx in meaningful_levels:
 # ---- Graph visualisation (graph_tool draw, level-0 modal partition) ---- #
 print("\nGenerating graph visualisation...")
 
-_coord_data = np.loadtxt(os.path.join(args.data_path, 'ATLAS', 'circle_coords_360_sorted.txt'),
+_coord_data = np.loadtxt(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_circle_coords__sorted.txt'),
                          delimiter='\t', skiprows=1, usecols=(0, 1))
 
 
@@ -327,8 +370,8 @@ degree_map   = g.degree_property_map("in")
 vertex_sizes = gt.prop_to_size(degree_map, mi=20, ma=50)
 
 # Edge alpha: normalised joint block connectivity strength under level-0 modal partition
-b0       = modal_assignments[0]
-bmat0    = block_connectivity[0]
+b0       = modal_assignments[meaningful_levels[0]]
+bmat0    = block_connectivity[meaningful_levels[0]]
 bmat_max = bmat0.max() if bmat0.max() > 0 else 1.0
 
 edge_alpha_arr = np.array([
@@ -401,14 +444,17 @@ plt.close()
 #                  block (majority-vote mapping over member nodes).
 
 outer_coord_data = np.loadtxt(
-    os.path.join(args.data_path,'ATLAS', 'circle_coords_360_sorted.txt'),
+    os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_circle_coords_sorted.txt'),
     delimiter='\t', skiprows=1, usecols=(0, 1)
 ).astype(float)
 
-b0   = modal_assignments[0]
-b1   = modal_assignments[1]
+b0   = modal_assignments[meaningful_levels[0]]
 n_b0 = int(b0.max()) + 1
-n_b1 = int(b1.max()) + 1
+
+# Inner ring uses the second meaningful level if it exists; otherwise omit it.
+_has_inner = len(meaningful_levels) >= 2
+b1   = modal_assignments[meaningful_levels[1]] if _has_inner else None
+n_b1 = int(b1.max()) + 1                       if _has_inner else 0
 
 # Outer circle geometry
 cx_outer = outer_coord_data[:, 0].mean()
@@ -431,30 +477,32 @@ ctrl_xy = np.column_stack([
     cy_outer + r_outer * np.sin(angles_b0)
 ])
 
-# Inner ring: level-1 block positions
-angles_b1 = np.linspace(0, 2 * np.pi, n_b1, endpoint=False)
-inner_xy  = np.column_stack([
-    cx_outer + r_inner * np.cos(angles_b1),
-    cy_outer + r_inner * np.sin(angles_b1)
-])
+# Inner ring: second meaningful level block positions (omitted if only one level)
+if _has_inner:
+    angles_b1 = np.linspace(0, 2 * np.pi, n_b1, endpoint=False)
+    inner_xy  = np.column_stack([
+        cx_outer + r_inner * np.cos(angles_b1),
+        cy_outer + r_inner * np.sin(angles_b1)
+    ])
+    b0_to_b1 = np.zeros(n_b0, dtype=int)
+    for blk0 in range(n_b0):
+        nodes_in = np.where(b0 == blk0)[0]
+        if nodes_in.size > 0:
+            b0_to_b1[blk0] = int(np.bincount(b1[nodes_in], minlength=n_b1).argmax())
+else:
+    inner_xy = None
+    b0_to_b1 = None
 
-# Mapping: level-0 block → level-1 block (majority vote over member nodes)
-b0_to_b1 = np.zeros(n_b0, dtype=int)
-for blk0 in range(n_b0):
-    nodes_in = np.where(b0 == blk0)[0]
-    if nodes_in.size > 0:
-        b0_to_b1[blk0] = int(np.bincount(b1[nodes_in], minlength=n_b1).argmax())
-
-# Normalise level-0 consistency scores to [0, 1] across all nodes so that
-# relative differences are visible even when all values are clustered near 1.
-# The least-consistent node maps to alpha=0.05; the most-consistent to 1.0.
-_cons0      = node_consistency[0]
-_cons_min   = float(_cons0.min())
-_cons_max   = float(_cons0.max())
-_cons_range = _cons_max - _cons_min if _cons_max > _cons_min else 1.0
-_alpha_min  = 0.05
-log_msg(f"| UPDATE | Node consistency (level 0): "
-        f"min={_cons_min:.3f}  max={_cons_max:.3f}  range={_cons_range:.3f}")
+# Normalise behavioural weighted degree to [alpha_min, 1.0] for node/spoke alpha.
+# A power transform (gamma > 1) strongly compresses low-degree nodes toward
+# alpha_min so they are barely visible, while high-degree nodes stay opaque.
+_deg_min    = float(beh_degree.min())
+_deg_max    = float(beh_degree.max())
+_deg_range  = _deg_max - _deg_min if _deg_max > _deg_min else 1.0
+_alpha_min  = 0.03
+_alpha_gamma = 1.0   # increase to push low-degree nodes further toward invisible
+log_msg(f"| UPDATE | Behaviour degree: "
+        f"min={_deg_min:.3f}  max={_deg_max:.3f}  range={_deg_range:.3f}")
 
 t_bez = np.linspace(0, 1, 80)
 idx_L = [i for i, loc in enumerate(locations) if loc.endswith('_L')]
@@ -474,30 +522,30 @@ for blk_feat in range(n_b0):
     members     = np.where(b0 == blk_feat)[0]
     non_members = np.where(b0 != blk_feat)[0]
     # ---- Spokes: outer node → its level-0 block node ---- #
-    # Alpha = posterior marginal probability of modal block assignment.
-    # Consistent members are opaque; ambiguous nodes are transparent.
+    # Alpha = normalised behavioural weighted degree.
+    # High-degree nodes are opaque; low-degree nodes are transparent.
     for node_idx in members:
         x1, y1    = outer_coord_data[node_idx]
         x2, y2    = middle_xy[blk_feat]
         cpx, cpy  = ctrl_xy[blk_feat]
         alpha_node = float(_alpha_min + (1.0 - _alpha_min) *
-                           (_cons0[node_idx] - _cons_min) / _cons_range)
+                           ((beh_degree[node_idx] - _deg_min) / _deg_range) ** _alpha_gamma)
         xc = (1 - t_bez)**2 * x1 + 2*(1 - t_bez)*t_bez * cpx + t_bez**2 * x2
         yc = (1 - t_bez)**2 * y1 + 2*(1 - t_bez)*t_bez * cpy + t_bez**2 * y2
         ax.plot(xc, yc, color=node_color[node_idx],
                 alpha=alpha_node, linewidth=0.7, zorder=2)
-    # ---- Middle→inner edges: shown in every subplot ---- #
-    for blk0 in range(n_b0):
-        blk1 = int(b0_to_b1[blk0])
-        ax.plot([middle_xy[blk0, 0], inner_xy[blk1, 0]],
-                [middle_xy[blk0, 1], inner_xy[blk1, 1]],
-                color='dimgray', alpha=0.5, linewidth=1.5, zorder=3)
-    # ---- Inner ring: level-1 block nodes ---- #
-    ax.scatter(inner_xy[:, 0], inner_xy[:, 1],
-               s=150, c='white', edgecolors='dimgray', linewidths=1.5, zorder=4)
-    for b in range(n_b1):
-        ax.text(inner_xy[b, 0], inner_xy[b, 1], str(b),
-                ha='center', va='center', fontsize=8, fontweight='bold', zorder=5)
+    # ---- Middle→inner edges and inner ring (only if a second level exists) ---- #
+    if _has_inner:
+        for blk0 in range(n_b0):
+            blk1 = int(b0_to_b1[blk0])
+            ax.plot([middle_xy[blk0, 0], inner_xy[blk1, 0]],
+                    [middle_xy[blk0, 1], inner_xy[blk1, 1]],
+                    color='dimgray', alpha=0.5, linewidth=1.5, zorder=3)
+        ax.scatter(inner_xy[:, 0], inner_xy[:, 1],
+                   s=150, c='white', edgecolors='dimgray', linewidths=1.5, zorder=4)
+        for b in range(n_b1):
+            ax.text(inner_xy[b, 0], inner_xy[b, 1], str(b),
+                    ha='center', va='center', fontsize=8, fontweight='bold', zorder=5)
     # ---- Middle ring: level-0 block nodes (featured block highlighted) ---- #
     c_mid  = ['gold' if b == blk_feat else 'white' for b in range(n_b0)]
     lw_mid = [2.5   if b == blk_feat else 1.5     for b in range(n_b0)]
@@ -507,13 +555,14 @@ for blk_feat in range(n_b0):
         ax.text(middle_xy[b, 0], middle_xy[b, 1], str(b),
                 ha='center', va='center', fontsize=8, fontweight='bold', zorder=7)
     # ---- Outer nodes: non-members grayed, members colored by location ---- #
-    # Member node alpha matches spoke alpha (normalised consistency score).
+    # Member node alpha matches spoke alpha (normalised behavioural degree).
     nm_L = [i for i in non_members if locations[i].endswith('_L')]
     nm_R = [i for i in non_members if locations[i].endswith('_R')]
     m_L  = [i for i in members     if locations[i].endswith('_L')]
     m_R  = [i for i in members     if locations[i].endswith('_R')]
     def _node_rgba(node_idx):
-        a   = _alpha_min + (1.0 - _alpha_min) * (_cons0[node_idx] - _cons_min) / _cons_range
+        a   = _alpha_min + (1.0 - _alpha_min) * \
+              ((beh_degree[node_idx] - _deg_min) / _deg_range) ** _alpha_gamma
         r, g, b, _ = to_rgba(node_color[node_idx])
         return (r, g, b, float(a))
     if nm_L:

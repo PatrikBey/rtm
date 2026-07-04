@@ -24,7 +24,10 @@
 import numpy as np
 import graph_tool.all as gt
 from graph_tool import inference
+from tqdm import tqdm
 from utils import log_msg
+
+_DIST_TO_REC = {'normal': 'real-normal', 'poisson': 'discrete-poisson'}
 
 
 
@@ -33,7 +36,8 @@ from utils import log_msg
 #########################
 
 def create_multilayer_graph(adjacency_matrices, behavioral_values, node_names,
-                            edge_threshold=50, th_apply='split'):
+                            edge_threshold=50, th_apply='split',
+                            behaviour_dist='normal', cooccurrence_dist='poisson'):
     """
     Create a redundant two-layer graph for weighted nested SBM inference.
 
@@ -82,6 +86,14 @@ def create_multilayer_graph(adjacency_matrices, behavioral_values, node_names,
         behaviour_weighted[behaviour_weighted < threshold_value] = 0
         cooccurrence_binary[cooccurrence_binary < threshold_value] = 0
 
+    # Store pre-z-score masks for normal layers. Z-scoring produces negative values
+    # for below-mean edges; for normal layers those are valid and must be included,
+    # so edge existence must be checked against the original values. For poisson
+    # layers the > 0 check after z-scoring is correct — negative values are invalid
+    # for discrete-poisson and should be excluded, which is the original behaviour.
+    beh_mask = behaviour_weighted > 0
+    occ_mask = cooccurrence_binary > 0
+
     for layer_mat in [behaviour_weighted, cooccurrence_binary]:
         mask = layer_mat > 0
         if mask.any():
@@ -103,8 +115,10 @@ def create_multilayer_graph(adjacency_matrices, behavioral_values, node_names,
 
     for i in range(n_nodes_dim1):
         for j in range(i + 1, n_nodes_dim1):
-            has_beh = behaviour_weighted[i, j] > 0
-            has_occ = cooccurrence_binary[i, j] > 0
+            has_beh = bool(beh_mask[i, j]) if behaviour_dist == 'normal' \
+                      else behaviour_weighted[i, j] > 0
+            has_occ = bool(occ_mask[i, j]) if cooccurrence_dist == 'normal' \
+                      else cooccurrence_binary[i, j] > 0
             if has_beh or has_occ:
                 beh_val = float(behaviour_weighted[i, j]) if has_beh else 0.0
                 occ_val = float(cooccurrence_binary[i, j]) if has_occ else 0.0
@@ -134,45 +148,40 @@ def create_multilayer_graph(adjacency_matrices, behavioral_values, node_names,
 #########################
 
 def fit_nested_sbm_layered(graph,
-                           mcmc_samples=100000,
-                           burn_in=50000,
-                           annealing_temps=(1, 10),
-                           annealing_steps=100,
-                           convergence_fraction=0.05):
+                           max_iter=10000,
+                           window_size=500,
+                           shift_factor=0.5,
+                           behaviour_dist='normal',
+                           cooccurrence_dist='poisson'):
     """
     Fit nested layered stochastic block model to multi-layer weighted graph.
 
-    Two-phase sampling strategy
-    ---------------------------
-    Phase 1 (mcmc_samples sweeps): records entropy only. Used to locate t_star,
-    the first iteration where remaining entropy reduction <=
-    convergence_fraction * total_reduction. No partition accumulation occurs here.
+    Sampling strategy
+    -----------------
+    After annealing and a short burn-in, a single MCMC loop runs up to max_iter
+    sweeps. The first window_size iterations establish a reference mean and
+    standard deviation. The change point is the first subsequent iteration where
+    the sliding window mean drops below:
 
-    Phase 2 (n_converged = mcmc_samples - t_star sweeps from warm state):
-    At each converged sweep the function records:
-      - projected node-level block assignments at each meaningful level
-        (for PartitionModeState label-switching correction)
-      - the level-0 mrs matrix (model-internal block-to-block edge counts,
-        joint across both graph layers)
+        threshold = first_window_mean - shift_factor * first_window_std
 
-    After Phase 2:
-      - PartitionModeState finds the modal (most probable) partition at each
-        meaningful level, resolving label switching.
-      - The level-0 mrs matrices are aggregated upward to each level using the
-        projected assignments, remapped to modal labels, and averaged across
-        converged samples to yield block_connectivity: a single joint
-        block-to-block connectivity matrix per level that reflects the model's
-        internal representation — not a projection onto individual graph layers.
+    This detects a meaningful shift in the mean entropy level. The standard
+    deviation of the initial window defines the natural scale of variability;
+    shift_factor controls how many of those units constitute a real shift rather
+    than noise. Once the change point is detected, window_size additional
+    accumulation sweeps are run and block assignments are collected from those.
+    If max_iter is reached without a shift a warning is logged and accumulation
+    proceeds from the final state.
 
     Parameters
     ----------
-    graph               : graph_tool.Graph from create_multilayer_graph()
-    mcmc_samples        : int   — Phase 1 entropy-tracking sweeps (default 100000)
-    burn_in             : int   — burn-in iterations before Phase 1 (default 50000)
-    annealing_temps     : tuple — (min_temp, max_temp) for annealing (default (1,10))
-    annealing_steps     : int   — number of annealing steps (default 100)
-    convergence_fraction: float — fraction of total entropy reduction defining
-                                  the convergence threshold (default 0.05)
+    graph            : graph_tool.Graph from create_multilayer_graph()
+    max_iter         : int   — maximum MCMC sweeps for change-point search (default 10000)
+    window_size      : int   — rolling window length and accumulation sample count
+                               (default 500)
+    shift_factor     : float — threshold = first_window_mean - shift_factor * first_window_std;
+                               change point fires when sliding window mean drops below
+                               this value (default 0.5)
 
     Returns
     -------
@@ -183,23 +192,19 @@ def fit_nested_sbm_layered(graph,
         'meaningful_levels'     : list of level indices with > 1 block
         'levels_n_blocks'       : non-empty block count per level
         'levels_entropy'        : entropy per level
-        'entropy_trajectory'    : entropy at each Phase 1 iteration
-        'entropy_converged'     : entropy at each Phase 2 iteration
-        'convergence_iteration' : t_star
-        'n_converged_samples'   : number of Phase 2 samples
-        'convergence_fraction'  : value used
+        'entropy_trajectory'    : entropy at every main-loop iteration
+        'entropy_converged'     : entropy across the window_size accumulation sweeps
+        'convergence_iteration' : iteration of detected change point (max_iter if none)
+        'n_converged_samples'   : window_size
+        'converged'             : bool — True if change point was detected
         'modal_assignments'     : {level: (n_nodes,) int array}
-                                  Most probable block assignment per node at each
-                                  meaningful level, recovered via PartitionModeState.
-                                  Encodes the joint community structure derived from
-                                  both graph layers simultaneously.
         'block_connectivity'    : {level: (B x B) float ndarray}
-                                  Posterior mean of the model-internal block-to-block
-                                  edge count matrix (mrs), aggregated to each level
-                                  and aligned to modal labels. A single joint matrix
-                                  — not split by graph layer.
-        'mcmc_samples'          : Phase 1 sample count
-        'burn_in'               : burn-in used
+        'node_consistency'      : {level: (n_nodes,) float array in [0,1]}
+        'edge_mean'             : (n_nodes x n_nodes) posterior mean mrs[b_i,b_j]
+        'edge_var'              : (n_nodes x n_nodes) posterior variance
+        'max_iter'              : value used
+        'window_size'           : value used
+        'shift_factor'          : value used
     """
 
     g = graph.copy()
@@ -212,52 +217,71 @@ def fit_nested_sbm_layered(graph,
             state_args=dict(
                 ec=g.ep.layer,
                 recs=[g.ep.behaviour_weight, g.ep.cooccurrence_weight],
-                rec_types=["real-normal", "discrete-poisson"],
+                rec_types=[_DIST_TO_REC[behaviour_dist], _DIST_TO_REC[cooccurrence_dist]],
                 layers=True,
                 deg_corr=True
             )
         )
     )
 
-    # Annealing
-    log_msg('| UPDATE | starting annealing')
-    for temp in np.linspace(annealing_temps[1], annealing_temps[0], annealing_steps):
-        state.mcmc_sweep(niter=10, beta=1.0 / temp)
-    log_msg('| UPDATE | annealing complete')
-
-    # Burn-in
-    log_msg('| UPDATE | starting burn-in')
-    for _ in range(burn_in):
-        state.mcmc_sweep(niter=1)
-    log_msg('| UPDATE | burn-in complete')
-
     n_verts = g.num_vertices()
 
-    # ---- Phase 1: entropy tracking only ---- #
-    dS = np.zeros(mcmc_samples)
-    log_msg('| UPDATE | starting phase 1 mcmc')
-    _step1 = max(1, mcmc_samples // 10)
-    for i in range(mcmc_samples):
-        state.mcmc_sweep(niter=1)
-        dS[i] = state.entropy()
-        if (i + 1) % _step1 == 0:
-            log_msg(f'| UPDATE | finished {(i + 1) * 100 // mcmc_samples}% of mcmc iterations')
+    # ---- Main MCMC loop with mean-shift change-point detection ---- #
+    # The first window_size iterations establish a reference mean and std.
+    # The threshold is first_window_mean - shift_factor * first_window_std.
+    # Change point = first iteration where the sliding window mean drops below
+    # that threshold, indicating a meaningful shift in entropy level.
+    entropy_traj      = []
+    converged         = False
+    conv_iter         = max_iter
+    first_window_mean = None
+    first_window_std  = None
+    threshold         = None
 
-    # ---- Convergence threshold ---- #
-    total_reduction = dS[0] - dS.min()
-    if total_reduction > 0:
-        conv_threshold = dS.min() + convergence_fraction * total_reduction
-        crossing = np.where(dS <= conv_threshold)[0]
-        t_star = int(crossing[0]) if crossing.size > 0 else mcmc_samples - 1
+    log_msg('| UPDATE | starting MCMC change-point detection loop')
+    with tqdm(total=max_iter, desc='MCMC', unit='iter') as pbar:
+        for i in range(max_iter):
+            state.mcmc_sweep(niter=1)
+            entropy_traj.append(state.entropy())
+
+            if i == window_size - 1:
+                first_window_mean = sum(entropy_traj) / window_size
+                first_window_std  = (
+                    sum((x - first_window_mean) ** 2 for x in entropy_traj) / window_size
+                ) ** 0.5
+                threshold = first_window_mean - shift_factor * first_window_std
+                pbar.set_postfix(ref=f'{first_window_mean:.1f}',
+                                 thr=f'{threshold:.1f}')
+
+            elif threshold is not None:
+                w_mean = sum(entropy_traj[-window_size:]) / window_size
+                if w_mean < threshold:
+                    converged = True
+                    conv_iter = i
+                    pbar.set_postfix(DL=f'{entropy_traj[-1]:.1f}',
+                                     w_mean=f'{w_mean:.1f}',
+                                     status='SHIFT')
+                    pbar.update(1)
+                    break
+
+            if i % 100 == 0:
+                pbar.set_postfix(DL=f'{entropy_traj[-1]:.1f}')
+            pbar.update(1)
+
+    dS = np.array(entropy_traj)
+
+    if converged:
+        log_msg(f'| UPDATE | mean-shift change point at iteration {conv_iter} '
+                f'| ref={first_window_mean:.2f}, std={first_window_std:.2f}, '
+                f'threshold={threshold:.2f}, shift_factor={shift_factor}')
     else:
-        t_star = 0
-    n_converged = mcmc_samples - t_star
+        log_msg(f'| WARNING | no mean shift detected within {max_iter} iterations '
+                f'| ref={first_window_mean:.2f}, threshold={threshold:.2f} '
+                f'— using last {window_size} iterations. '
+                f'Consider increasing max_iter or reducing shift_factor '
+                f'(current: {shift_factor}).')
 
     # ---- Meaningful levels ---- #
-    # get_nonempty_B() is unreliable for layered nested states (can return 1
-    # even for levels with genuine block structure). Use entropy instead:
-    # the degenerate single-block levels all collapse to the same floor value,
-    # so any level with entropy strictly above that floor is meaningful.
     _levels_init    = state.get_levels()
     n_levels        = len(_levels_init)
     _entropies_init = [lv.entropy() for lv in _levels_init]
@@ -265,59 +289,51 @@ def fit_nested_sbm_layered(graph,
     meaningful_levels = [k for k in range(n_levels)
                          if _entropies_init[k] > entropy_floor]
 
-    # ---- Phase 2: converged accumulation ---- #
-    # Collect per-iteration:
-    #   b_history[k]  — projected node-level assignment at level k
-    #   b0_history    — level-0 block assignments (for mrs aggregation)
-    #   mrs0_history  — level-0 mrs matrix (joint, both layers, model-internal)
-    #   edge_M1/M2    — online accumulators for edge variance:
-    #                   for each node pair (i,j), track mrs[b_i, b_j] to compute
-    #                   mean and variance across converged iterations. This is
-    #                   "edge existence in the final model partition, informed by
-    #                   both layers" — low variance = consistently identified edge.
+    # ---- Accumulation: window_size sweeps from converged state ---- #
+    # Runs a fresh set of window_size sweeps from the current state and collects
+    # block assignments and joint mrs matrices for inference. Memory is bounded:
+    # only window_size samples are ever stored simultaneously.
     b_history    = {k: [] for k in meaningful_levels}
     b0_history   = []
     mrs0_history = []
 
-    edge_M1 = np.zeros((n_verts, n_verts))   # running sum
-    edge_M2 = np.zeros((n_verts, n_verts))   # running sum of squares
+    edge_M1 = np.zeros((n_verts, n_verts))
+    edge_M2 = np.zeros((n_verts, n_verts))
 
-    dS_converged = np.zeros(n_converged)
-    log_msg('| UPDATE | starting phase 2 accumulation')
-    _step2 = max(1, n_converged // 10)
-    for i in range(n_converged):
-        state.mcmc_sweep(niter=1)
-        dS_converged[i] = state.entropy()
+    dS_converged = np.zeros(window_size)
+    log_msg(f'| UPDATE | accumulating {window_size} samples from converged state')
+    with tqdm(total=window_size, desc='Accumulation', unit='iter') as pbar:
+        for i in range(window_size):
+            state.mcmc_sweep(niter=1)
+            dS_converged[i] = state.entropy()
 
-        # Level-0 state: block assignments and joint mrs
-        lv0          = state.get_levels()[0]
-        b0_arr       = lv0.get_blocks().a.copy()
-        mrs0_sparse  = lv0.get_matrix()
-        mrs0_arr     = mrs0_sparse.toarray().astype(float) \
-                       if hasattr(mrs0_sparse, 'toarray') \
-                       else np.array(mrs0_sparse, dtype=float)
-        b0_history.append(b0_arr)
-        mrs0_history.append(mrs0_arr)
+            lv0         = state.get_levels()[0]
+            b0_arr      = lv0.get_blocks().a.copy()
+            mrs0_sparse = lv0.get_matrix()
+            mrs0_arr    = mrs0_sparse.toarray().astype(float) \
+                          if hasattr(mrs0_sparse, 'toarray') \
+                          else np.array(mrs0_sparse, dtype=float)
+            b0_history.append(b0_arr)
+            mrs0_history.append(mrs0_arr)
 
-        # Accumulate mrs[b_i, b_j] for every node pair (vectorised)
-        B0_size = mrs0_arr.shape[0]
-        b_clip  = np.minimum(b0_arr, B0_size - 1).astype(int)
-        vals    = mrs0_arr[np.ix_(b_clip, b_clip)]
-        edge_M1 += vals
-        edge_M2 += vals ** 2
+            B0_size = mrs0_arr.shape[0]
+            b_clip  = np.minimum(b0_arr, B0_size - 1).astype(int)
+            vals    = mrs0_arr[np.ix_(b_clip, b_clip)]
+            edge_M1 += vals
+            edge_M2 += vals ** 2
 
-        # Projected node-level assignments for each meaningful level
-        for k in meaningful_levels:
-            proj  = state.project_partition(k, 0)
-            b_arr = proj.a.copy() if hasattr(proj, 'a') else \
-                    np.array([proj[v] for v in g.vertices()])
-            b_history[k].append(b_arr)
+            for k in meaningful_levels:
+                proj  = state.project_partition(k, 0)
+                b_arr = proj.a.copy() if hasattr(proj, 'a') else \
+                        np.array([proj[v] for v in g.vertices()])
+                b_history[k].append(b_arr)
 
-        if (i + 1) % _step2 == 0:
-            log_msg(f'| UPDATE | finished {(i + 1) * 100 // n_converged}% of mcmc iterations')
+            if i % 50 == 0:
+                pbar.set_postfix(DL=f'{dS_converged[i]:.1f}')
+            pbar.update(1)
 
-    edge_mean = edge_M1 / n_converged
-    edge_var  = np.maximum(edge_M2 / n_converged - edge_mean ** 2, 0.0)
+    edge_mean = edge_M1 / window_size
+    edge_var  = np.maximum(edge_M2 / window_size - edge_mean ** 2, 0.0)
 
     # ---- Modal partitions + node assignment consistency ---- #
     # PartitionModeState resolves label switching and gives:
@@ -353,7 +369,7 @@ def fit_nested_sbm_layered(graph,
         B_modal = int(b_modal_k.max()) + 1
         accum   = np.zeros((B_modal, B_modal))
 
-        for i in range(n_converged):
+        for i in range(window_size):
             b0_iter  = b0_history[i]        # node → level-0 block label
             mrs0_i   = mrs0_history[i]      # (B0 x B0) joint edge count matrix
             b_k_iter = b_history[k][i]      # node → current level-k block label
@@ -385,7 +401,7 @@ def fit_nested_sbm_layered(graph,
                     s_modal = remap[b0_to_bk[s0]]
                     accum[r_modal, s_modal] += mrs0_i[r0, s0]
 
-        return accum / n_converged
+        return accum / window_size
 
     block_connectivity = {}
     for k in meaningful_levels:
@@ -405,16 +421,238 @@ def fit_nested_sbm_layered(graph,
         'levels_entropy':        [lv.entropy()         for lv in _levels_final],
         'entropy_trajectory':    dS,
         'entropy_converged':     dS_converged,
-        'convergence_iteration': t_star,
-        'n_converged_samples':   n_converged,
-        'convergence_fraction':  convergence_fraction,
-        'modal_assignments':     modal_assignments,    # {level: (n_nodes,) array}
-        'block_connectivity':    block_connectivity,   # {level: (B x B) array}
-        'node_consistency':      node_consistency,     # {level: (n_nodes,) array in [0,1]} — assignment consistency
-        'edge_mean':             edge_mean,            # (n_nodes x n_nodes) posterior mean mrs[b_i,b_j]
-        'edge_var':              edge_var,             # (n_nodes x n_nodes) posterior variance — low = stable
-        'mcmc_samples':          mcmc_samples,
-        'burn_in':               burn_in,
+        'convergence_iteration': conv_iter,
+        'n_converged_samples':   window_size,
+        'converged':             converged,
+        'threshold':             threshold,
+        'first_window_mean':     first_window_mean,
+        'first_window_std':      first_window_std,
+        'modal_assignments':     modal_assignments,
+        'block_connectivity':    block_connectivity,
+        'node_consistency':      node_consistency,
+        'edge_mean':             edge_mean,
+        'edge_var':              edge_var,
+        'max_iter':              max_iter,
+        'window_size':           window_size,
+        'shift_factor':          shift_factor,
+    }
+
+    return results
+
+
+def fit_nested_sbm_layered_multiflip(graph,
+                                     max_iter=10000,
+                                     window_size=500,
+                                     shift_factor=0.5,
+                                     behaviour_dist='normal',
+                                     cooccurrence_dist='poisson'):
+    """
+    Identical to fit_nested_sbm_layered but uses multiflip_mcmc_sweep instead of
+    mcmc_sweep. Multiflip proposes merge/split moves which can escape local minima
+    that single-node proposals cannot, making it more effective when
+    minimize_nested_blockmodel_dl has already converged to a local optimum.
+
+    Parameters and return value are identical to fit_nested_sbm_layered.
+    """
+
+    g = graph.copy()
+
+    state = gt.minimize_nested_blockmodel_dl(
+        g,
+        state_args=dict(
+            base_type=gt.LayeredBlockState,
+            state_args=dict(
+                ec=g.ep.layer,
+                recs=[g.ep.behaviour_weight, g.ep.cooccurrence_weight],
+                rec_types=[_DIST_TO_REC[behaviour_dist], _DIST_TO_REC[cooccurrence_dist]],
+                layers=True,
+                deg_corr=True
+            )
+        )
+    )
+
+    n_verts = g.num_vertices()
+
+    entropy_traj      = []
+    converged         = False
+    conv_iter         = max_iter
+    first_window_mean = None
+    first_window_std  = None
+    threshold         = None
+
+    log_msg('| UPDATE | starting multiflip MCMC change-point detection loop')
+    with tqdm(total=max_iter, desc='MCMC-mf', unit='iter') as pbar:
+        for i in range(max_iter):
+            state.multiflip_mcmc_sweep(niter=1)
+            entropy_traj.append(state.entropy())
+
+            if i == window_size - 1:
+                first_window_mean = sum(entropy_traj) / window_size
+                first_window_std  = (
+                    sum((x - first_window_mean) ** 2 for x in entropy_traj) / window_size
+                ) ** 0.5
+                threshold = first_window_mean - shift_factor * first_window_std
+                pbar.set_postfix(ref=f'{first_window_mean:.1f}',
+                                 thr=f'{threshold:.1f}')
+
+            elif threshold is not None:
+                w_mean = sum(entropy_traj[-window_size:]) / window_size
+                if w_mean < threshold:
+                    converged = True
+                    conv_iter = i
+                    pbar.set_postfix(DL=f'{entropy_traj[-1]:.1f}',
+                                     w_mean=f'{w_mean:.1f}',
+                                     status='SHIFT')
+                    pbar.update(1)
+                    break
+
+            if i % 100 == 0:
+                pbar.set_postfix(DL=f'{entropy_traj[-1]:.1f}')
+            pbar.update(1)
+
+    dS = np.array(entropy_traj)
+
+    if converged:
+        log_msg(f'| UPDATE | multiflip mean-shift change point at iteration {conv_iter} '
+                f'| ref={first_window_mean:.2f}, std={first_window_std:.2f}, '
+                f'threshold={threshold:.2f}, shift_factor={shift_factor}')
+    else:
+        log_msg(f'| WARNING | multiflip: no mean shift detected within {max_iter} iterations '
+                f'| ref={first_window_mean:.2f}, threshold={threshold:.2f} '
+                f'— using last {window_size} iterations. '
+                f'Consider increasing max_iter or reducing shift_factor '
+                f'(current: {shift_factor}).')
+
+    _levels_init    = state.get_levels()
+    n_levels        = len(_levels_init)
+    _entropies_init = [lv.entropy() for lv in _levels_init]
+    entropy_floor   = min(_entropies_init)
+    meaningful_levels = [k for k in range(n_levels)
+                         if _entropies_init[k] > entropy_floor]
+
+    b_history    = {k: [] for k in meaningful_levels}
+    b0_history   = []
+    mrs0_history = []
+
+    edge_M1 = np.zeros((n_verts, n_verts))
+    edge_M2 = np.zeros((n_verts, n_verts))
+
+    dS_converged = np.zeros(window_size)
+    log_msg(f'| UPDATE | accumulating {window_size} samples from converged state (multiflip)')
+    with tqdm(total=window_size, desc='Accum-mf', unit='iter') as pbar:
+        for i in range(window_size):
+            state.multiflip_mcmc_sweep(niter=1)
+            dS_converged[i] = state.entropy()
+
+            lv0         = state.get_levels()[0]
+            b0_arr      = lv0.get_blocks().a.copy()
+            mrs0_sparse = lv0.get_matrix()
+            mrs0_arr    = mrs0_sparse.toarray().astype(float) \
+                          if hasattr(mrs0_sparse, 'toarray') \
+                          else np.array(mrs0_sparse, dtype=float)
+            b0_history.append(b0_arr)
+            mrs0_history.append(mrs0_arr)
+
+            B0_size = mrs0_arr.shape[0]
+            b_clip  = np.minimum(b0_arr, B0_size - 1).astype(int)
+            vals    = mrs0_arr[np.ix_(b_clip, b_clip)]
+            edge_M1 += vals
+            edge_M2 += vals ** 2
+
+            for k in meaningful_levels:
+                proj  = state.project_partition(k, 0)
+                b_arr = proj.a.copy() if hasattr(proj, 'a') else \
+                        np.array([proj[v] for v in g.vertices()])
+                b_history[k].append(b_arr)
+
+            if i % 50 == 0:
+                pbar.set_postfix(DL=f'{dS_converged[i]:.1f}')
+            pbar.update(1)
+
+    edge_mean = edge_M1 / window_size
+    edge_var  = np.maximum(edge_M2 / window_size - edge_mean ** 2, 0.0)
+
+    modal_assignments = {}
+    node_consistency  = {}
+    for k in meaningful_levels:
+        pmode    = gt.PartitionModeState(b_history[k], converge=True)
+        b_mode   = pmode.get_max(g)
+        b_modal  = b_mode.a.copy() if hasattr(b_mode, 'a') else \
+                   np.array([b_mode[v] for v in g.vertices()])
+        modal_assignments[k] = b_modal
+
+        marginals = pmode.get_marginal(g)
+        node_consistency[k] = np.array([
+            float(marginals[g.vertex(i)][int(b_modal[i])])
+            if int(b_modal[i]) < len(marginals[g.vertex(i)]) else 0.0
+            for i in range(n_verts)
+        ])
+
+    def _aggregate_mrs_to_level(k, b_modal_k):
+        B_modal = int(b_modal_k.max()) + 1
+        accum   = np.zeros((B_modal, B_modal))
+
+        for i in range(window_size):
+            b0_iter  = b0_history[i]
+            mrs0_i   = mrs0_history[i]
+            b_k_iter = b_history[k][i]
+
+            B0_cur = mrs0_i.shape[0]
+            B0_nv  = int(b0_iter.max()) + 1
+
+            b0_to_bk = np.zeros(max(B0_cur, B0_nv), dtype=int)
+            for node in range(n_verts):
+                b0_to_bk[b0_iter[node]] = b_k_iter[node]
+
+            B_k_cur = int(b_k_iter.max()) + 1
+            remap   = np.zeros(B_k_cur, dtype=int)
+            for r in range(B_k_cur):
+                nodes_r = np.where(b_k_iter == r)[0]
+                if nodes_r.size > 0:
+                    remap[r] = int(
+                        np.bincount(b_modal_k[nodes_r],
+                                    minlength=B_modal).argmax()
+                    )
+
+            for r0 in range(min(B0_cur, B0_nv)):
+                r_modal = remap[b0_to_bk[r0]]
+                for s0 in range(min(B0_cur, B0_nv)):
+                    s_modal = remap[b0_to_bk[s0]]
+                    accum[r_modal, s_modal] += mrs0_i[r0, s0]
+
+        return accum / window_size
+
+    block_connectivity = {}
+    for k in meaningful_levels:
+        log_msg(f'| UPDATE | aggregating mrs to level {k} (multiflip)')
+        block_connectivity[k] = _aggregate_mrs_to_level(k, modal_assignments[k])
+        log_msg(f'| UPDATE | finished aggregating mrs to level {k} (multiflip)')
+
+    _levels_final = state.get_levels()
+
+    results = {
+        'state':                 state,
+        'entropy':               state.entropy(),
+        'n_levels':              n_levels,
+        'meaningful_levels':     meaningful_levels,
+        'levels_n_blocks':       [lv.get_nonempty_B() for lv in _levels_final],
+        'levels_entropy':        [lv.entropy()         for lv in _levels_final],
+        'entropy_trajectory':    dS,
+        'entropy_converged':     dS_converged,
+        'convergence_iteration': conv_iter,
+        'n_converged_samples':   window_size,
+        'converged':             converged,
+        'threshold':             threshold,
+        'first_window_mean':     first_window_mean,
+        'first_window_std':      first_window_std,
+        'modal_assignments':     modal_assignments,
+        'block_connectivity':    block_connectivity,
+        'node_consistency':      node_consistency,
+        'edge_mean':             edge_mean,
+        'edge_var':              edge_var,
+        'max_iter':              max_iter,
+        'window_size':           window_size,
+        'shift_factor':          shift_factor,
     }
 
     return results
