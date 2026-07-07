@@ -67,7 +67,7 @@ def load_graphs(path, atlas, subject_list, part, score_col):
         behaviour.append(float(val[0]))
         adj_matrices_list.append(np.where(data >= np.quantile(data[data > 0], .5), 1, 0))
     adj_matrices = np.stack(adj_matrices_list).astype(np.int32)
-    behaviour = list((np.array(behaviour) - np.mean(behaviour)) / np.std(behaviour))
+    behaviour = [float(v) for v in behaviour]
     return subject_list_clean, behaviour, adj_matrices, subjects_missing_score, empty_subjects
 
 

@@ -36,22 +36,26 @@ _DIST_TO_REC = {'normal': 'real-normal', 'poisson': 'discrete-poisson'}
 #########################
 
 def create_multilayer_graph(adjacency_matrices, behavioral_values, node_names,
-                            edge_threshold=50, th_apply='split',
-                            behaviour_dist='normal', cooccurrence_dist='poisson'):
+                            edge_threshold=50,
+                            behaviour_dist='normal', cooccurrence_dist='normal',
+                            combined_layers=True):
     """
     Create a redundant two-layer graph for weighted nested SBM inference.
 
-    Each node pair (i, j) appears in both layers with complementary weights:
-    - Layer 0: behaviour_weight active, cooccurrence_weight = 0
-    - Layer 1: cooccurrence_weight active, behaviour_weight = 0
+    Both layers default to real-normal, which is scale-invariant — raw weights
+    are used directly. If cooccurrence_dist='poisson', the cooccurrence layer is
+    [0,1] min-max scaled to reduce scale impact (discrete-Poisson DL scales
+    linearly with weight magnitude).
+
+    Edge structure: each layer is thresholded independently at edge_threshold
+    percentile; only edges surviving in both layers are retained (intersection).
 
     Parameters
     ----------
     adjacency_matrices : ndarray, shape (n_patients, n_nodes, n_nodes)
-    behavioral_values  : ndarray, shape (n_patients,)
+    behavioral_values  : ndarray, shape (n_patients,)  — raw tau values (> 0)
     node_names         : list, length n_nodes
-    edge_threshold     : float, percentile threshold for edge filtering (default 50)
-    th_apply           : 'split' applies threshold per layer; else applies jointly
+    edge_threshold     : float, percentile threshold applied per layer (default 50)
 
     Returns
     -------
@@ -67,39 +71,36 @@ def create_multilayer_graph(adjacency_matrices, behavioral_values, node_names,
     behaviour_weighted = np.zeros((n_nodes_dim1, n_nodes_dim1))
     for i in range(n_patients):
         behaviour_weighted += adjacency_matrices[i] * behavioral_values[i]
-    cooccurrence_binary = np.sum(adjacency_matrices, axis=0)
+    cooccurrence_binary = np.sum(adjacency_matrices, axis=0).astype(float)
 
-    if th_apply == 'split':
-        beh_nz = behaviour_weighted[behaviour_weighted > 0]
-        occ_nz = cooccurrence_binary[cooccurrence_binary > 0]
-        beh_thresh = np.percentile(beh_nz, edge_threshold) if beh_nz.size > 0 else 0
-        occ_thresh = np.percentile(occ_nz, edge_threshold) if occ_nz.size > 0 else 0
-        behaviour_weighted[behaviour_weighted < beh_thresh] = 0
-        cooccurrence_binary[cooccurrence_binary < occ_thresh] = 0
-        threshold_value = (beh_thresh, occ_thresh)
-    else:
-        combined_nz = np.concatenate([
-            behaviour_weighted[behaviour_weighted > 0],
-            cooccurrence_binary[cooccurrence_binary > 0]
-        ])
-        threshold_value = np.percentile(combined_nz, edge_threshold)
-        behaviour_weighted[behaviour_weighted < threshold_value] = 0
-        cooccurrence_binary[cooccurrence_binary < threshold_value] = 0
+    # If cooccurrence layer uses Poisson, min-max scale to [0,1] to reduce
+    # scale impact (Poisson DL is not scale-invariant; raw counts would dominate)
+    if cooccurrence_dist == 'poisson':
+        nz = cooccurrence_binary[cooccurrence_binary > 0]
+        if nz.size > 0:
+            lo, hi = nz.min(), nz.max()
+            cooccurrence_binary[cooccurrence_binary > 0] = \
+                (cooccurrence_binary[cooccurrence_binary > 0] - lo) / (hi - lo) \
+                if hi > lo else 1.0
 
-    # Store pre-z-score masks for normal layers. Z-scoring produces negative values
-    # for below-mean edges; for normal layers those are valid and must be included,
-    # so edge existence must be checked against the original values. For poisson
-    # layers the > 0 check after z-scoring is correct — negative values are invalid
-    # for discrete-poisson and should be excluded, which is the original behaviour.
+    # Threshold each layer independently on raw (or scaled) values
+    beh_nz = behaviour_weighted[behaviour_weighted > 0]
+    occ_nz = cooccurrence_binary[cooccurrence_binary > 0]
+    beh_thresh = np.percentile(beh_nz, edge_threshold) if beh_nz.size > 0 else 0
+    occ_thresh = np.percentile(occ_nz, edge_threshold) if occ_nz.size > 0 else 0
+    behaviour_weighted[behaviour_weighted < beh_thresh] = 0
+    cooccurrence_binary[cooccurrence_binary < occ_thresh] = 0
+    threshold_value = (beh_thresh, occ_thresh)
+
+    # Edge masks after thresholding
     beh_mask = behaviour_weighted > 0
     occ_mask = cooccurrence_binary > 0
 
-    for layer_mat in [behaviour_weighted, cooccurrence_binary]:
-        mask = layer_mat > 0
-        if mask.any():
-            mu, sigma = layer_mat[mask].mean(), layer_mat[mask].std()
-            if sigma > 0:
-                layer_mat[mask] = (layer_mat[mask] - mu) / sigma
+    if combined_layers:
+        # Intersection: enforce identical edge structure across both layers
+        shared = beh_mask & occ_mask
+        beh_mask = shared
+        occ_mask = shared
 
     g = gt.Graph(directed=False)
     g.add_vertex(n_nodes_dim1)
@@ -115,22 +116,21 @@ def create_multilayer_graph(adjacency_matrices, behavioral_values, node_names,
 
     for i in range(n_nodes_dim1):
         for j in range(i + 1, n_nodes_dim1):
-            has_beh = bool(beh_mask[i, j]) if behaviour_dist == 'normal' \
-                      else behaviour_weighted[i, j] > 0
-            has_occ = bool(occ_mask[i, j]) if cooccurrence_dist == 'normal' \
-                      else cooccurrence_binary[i, j] > 0
-            if has_beh or has_occ:
-                beh_val = float(behaviour_weighted[i, j]) if has_beh else 0.0
-                occ_val = float(cooccurrence_binary[i, j]) if has_occ else 0.0
+            has_beh = bool(beh_mask[i, j])
+            has_occ = bool(occ_mask[i, j])
+            if not (has_beh or has_occ):
+                continue
 
+            if has_beh:
                 e0 = g.add_edge(g.vertex(i), g.vertex(j))
-                behaviour_weight_prop[e0]    = beh_val
+                behaviour_weight_prop[e0]    = float(behaviour_weighted[i, j])
                 cooccurrence_weight_prop[e0] = 0.0
                 layer_prop[e0]               = 0
 
+            if has_occ:
                 e1 = g.add_edge(g.vertex(i), g.vertex(j))
                 behaviour_weight_prop[e1]    = 0.0
-                cooccurrence_weight_prop[e1] = occ_val
+                cooccurrence_weight_prop[e1] = float(cooccurrence_binary[i, j])
                 layer_prop[e1]               = 1
 
     g.ep.behaviour_weight    = behaviour_weight_prop
@@ -152,7 +152,8 @@ def fit_nested_sbm_layered(graph,
                            window_size=500,
                            shift_factor=0.5,
                            behaviour_dist='normal',
-                           cooccurrence_dist='poisson'):
+                           cooccurrence_dist='poisson',
+                           seed=42):
     """
     Fit nested layered stochastic block model to multi-layer weighted graph.
 
@@ -207,6 +208,7 @@ def fit_nested_sbm_layered(graph,
         'shift_factor'          : value used
     """
 
+    gt.seed_rng(seed)
     g = graph.copy()
 
     # ---- Initialise nested block state ---- #
@@ -335,15 +337,15 @@ def fit_nested_sbm_layered(graph,
     edge_mean = edge_M1 / window_size
     edge_var  = np.maximum(edge_M2 / window_size - edge_mean ** 2, 0.0)
 
-    # ---- Modal partitions + node assignment consistency ---- #
+    # ---- Modal partitions + node assignment consistency (Cohen's Kappa) ---- #
     # PartitionModeState resolves label switching and gives:
-    #   get_max(g)       — modal (most probable) block per node
-    #   get_marginals(g) — posterior probability of each block per node,
-    #                      in the same canonical labelling as get_max().
-    # node_consistency[k][i] = P(node i in its modal block) across converged
-    # iterations, properly accounting for label switching.
-    # Range [0, 1]: 1 = always placed in that block, 0 = never.
-    # Used as spoke alpha: bright = consistent member, transparent = ambiguous.
+    #   get_max(g)      — modal (most probable) block per node
+    #   get_marginal(g) — posterior probability of each block per node
+    # node_consistency[k][i] = chance-corrected consistency (Cohen's Kappa):
+    #   kappa = (P_modal - 1/n_blocks) / (1 - 1/n_blocks)
+    # kappa=1: always in modal block; kappa=0: at chance level; kappa<0: below chance.
+    # This accounts for the fact that with more blocks, even moderate raw probabilities
+    # represent strong consistency relative to random assignment.
     modal_assignments = {}
     node_consistency  = {}
     for k in meaningful_levels:
@@ -353,12 +355,16 @@ def fit_nested_sbm_layered(graph,
                    np.array([b_mode[v] for v in g.vertices()])
         modal_assignments[k] = b_modal
 
+        n_blocks  = int(b_modal.max()) + 1
+        chance    = 1.0 / n_blocks
+        n_samples = len(b_history[k])
         marginals = pmode.get_marginal(g)
-        node_consistency[k] = np.array([
-            float(marginals[g.vertex(i)][int(b_modal[i])])
+        raw = np.array([
+            float(marginals[g.vertex(i)][int(b_modal[i])]) / n_samples
             if int(b_modal[i]) < len(marginals[g.vertex(i)]) else 0.0
             for i in range(n_verts)
         ])
+        node_consistency[k] = (raw - chance) / (1.0 - chance)
 
     # ---- Joint block connectivity (model-internal mrs) ---- #
     # For each meaningful level k, aggregate the level-0 mrs upward using the
@@ -445,7 +451,8 @@ def fit_nested_sbm_layered_multiflip(graph,
                                      window_size=500,
                                      shift_factor=0.5,
                                      behaviour_dist='normal',
-                                     cooccurrence_dist='poisson'):
+                                     cooccurrence_dist='poisson',
+                                     seed=42):
     """
     Identical to fit_nested_sbm_layered but uses multiflip_mcmc_sweep instead of
     mcmc_sweep. Multiflip proposes merge/split moves which can escape local minima
@@ -455,6 +462,7 @@ def fit_nested_sbm_layered_multiflip(graph,
     Parameters and return value are identical to fit_nested_sbm_layered.
     """
 
+    gt.seed_rng(seed)
     g = graph.copy()
 
     state = gt.minimize_nested_blockmodel_dl(
@@ -581,12 +589,16 @@ def fit_nested_sbm_layered_multiflip(graph,
                    np.array([b_mode[v] for v in g.vertices()])
         modal_assignments[k] = b_modal
 
+        n_blocks  = int(b_modal.max()) + 1
+        chance    = 1.0 / n_blocks
+        n_samples = len(b_history[k])
         marginals = pmode.get_marginal(g)
-        node_consistency[k] = np.array([
-            float(marginals[g.vertex(i)][int(b_modal[i])])
+        raw = np.array([
+            float(marginals[g.vertex(i)][int(b_modal[i])]) / n_samples
             if int(b_modal[i]) < len(marginals[g.vertex(i)]) else 0.0
             for i in range(n_verts)
         ])
+        node_consistency[k] = (raw - chance) / (1.0 - chance)
 
     def _aggregate_mrs_to_level(k, b_modal_k):
         B_modal = int(b_modal_k.max()) + 1

@@ -56,25 +56,34 @@ args.add_argument('--max_iter', type=int, default=10000,
                   help='Maximum MCMC sweeps for change-point detection (default: 10000)')
 args.add_argument('--window_size', type=int, default=250,
                   help='Window size for change-point detection and accumulation (default: 250)')
-args.add_argument('--shift_factor', type=float, default=0.25,
+args.add_argument('--shift_factor', type=float, default=0.75,
                   help='Mean-shift threshold: change point when sliding window mean drops '
-                       'below first_window_mean - shift_factor * first_window_std (default: 0.5)')
+                       'below first_window_mean - shift_factor * first_window_std (default: 0.75)')
 args.add_argument('--multiflip', action='store_true', default=False,
                   help='Use multiflip_mcmc_sweep instead of mcmc_sweep (better local-minima escape)')
+args.add_argument('--seed', type=int, default=42,
+                  help='Random seed for graph_tool RNG (default: 42)')
 args.add_argument('--behaviour_dist', type=str, default='normal',
                   choices=['normal', 'poisson'],
                   help='Assumed distribution for the behaviour layer (default: normal)')
-args.add_argument('--cooccurrence_dist', type=str, default='poisson',
+args.add_argument('--cooccurrence_dist', type=str, default='normal',
                   choices=['normal', 'poisson'],
-                  help='Assumed distribution for the cooccurrence layer (default: poisson). '
-                       'Set to normal to rescale to [0,1] and equalise layer influence.')
+                  help='Assumed distribution for the cooccurrence layer (default: normal). '
+                       'Set to poisson to apply [0,1] rescaling and use discrete-Poisson DL.')
+args.add_argument('--combined_layers', action=argparse.BooleanOptionalAction, default=True,
+                  help='If set (default), threshold both layers jointly so they share the same '
+                       'edge structure (intersection). Use --no-combined-layers to threshold each '
+                       'layer independently, giving each its own edge set.')
 args = args.parse_args()
 
 log_msg(f"| START | Running multi-layer nested SBM on disconnectome data")
 log_msg(f"| UPDATE | Data path: {args.data_path}")
 log_msg(f"| UPDATE | Behaviour score: {args.score}")
 
-output_dir = os.path.join(args.data_path, 'RESULTS', f'SBM_{args.atlas}_{args.score}')
+if args.multiflip:
+    output_dir = os.path.join(args.data_path, 'RESULTS', f'SBM_{args.atlas}_{args.score}_multiflip')
+else:
+    output_dir = os.path.join(args.data_path, 'RESULTS', f'SBM_{args.atlas}_{args.score}_singleflip')
 
 # try:
 #     os.makedirs(output_dir, exist_ok=True)
@@ -116,10 +125,14 @@ log_msg(f"| UPDATE | Empty disconnectome: {len(empty_subjects)}")
 #         BUILD GRAPH           #
 #################################
 
-graph = create_multilayer_graph(adj_matrices, behaviour, node_names, edge_threshold=50,
+graph = create_multilayer_graph(adj_matrices, behaviour, node_names, edge_threshold=75,
                                behaviour_dist=args.behaviour_dist,
-                               cooccurrence_dist=args.cooccurrence_dist)
+                               cooccurrence_dist=args.cooccurrence_dist,
+                               combined_layers=args.combined_layers)
 occ_layer, beh_layer = get_graph_layers(graph)
+
+np.savetxt(os.path.join(output_dir, f'SBM_layer_{args.score}_cooccurrence.txt'), occ_layer, fmt='%.6f')
+np.savetxt(os.path.join(output_dir, f'SBM_layer_{args.score}_behaviour.txt'), beh_layer, fmt='%.6f')
 
 plt.figure(figsize=(8, 5))
 plt.subplot(1, 2, 1)
@@ -149,7 +162,8 @@ if args.multiflip:
         window_size=args.window_size,
         shift_factor=args.shift_factor,
         behaviour_dist=args.behaviour_dist,
-        cooccurrence_dist=args.cooccurrence_dist
+        cooccurrence_dist=args.cooccurrence_dist,
+        seed=args.seed
     )
 else:
     real_results = fit_nested_sbm_layered(
@@ -158,7 +172,8 @@ else:
         window_size=args.window_size,
         shift_factor=args.shift_factor,
         behaviour_dist=args.behaviour_dist,
-        cooccurrence_dist=args.cooccurrence_dist
+        cooccurrence_dist=args.cooccurrence_dist,
+        seed=args.seed
     )
 
 state_nested      = real_results['state']
@@ -230,14 +245,17 @@ for e in g.edges():
         beh_degree[int(e.target())] += w
 
 import csv
-roi_level_path = os.path.join(output_dir, f'roi_block_assignments_{args.score}.csv')
-level_cols     = [f'level_{k}' for k in meaningful_levels]
+roi_level_path  = os.path.join(output_dir, f'roi_block_assignments_{args.score}.csv')
+level_cols      = [f'level_{k}'       for k in meaningful_levels]
+consist_cols    = [f'consistency_{k}' for k in meaningful_levels]
+header          = ['roi_index', 'roi_name', 'behaviour_degree'] + level_cols + consist_cols
 with open(roi_level_path, 'w', newline='') as fh:
     writer = csv.writer(fh)
-    writer.writerow(['roi_index', 'roi_name', 'behaviour_degree'] + level_cols)
+    writer.writerow(header)
     for node_idx, roi_name in enumerate(node_names):
-        row = [node_idx, roi_name, round(float(beh_degree[node_idx]), 6)] + \
-              [int(modal_assignments[k][node_idx]) for k in meaningful_levels]
+        block_vals   = [int(modal_assignments[k][node_idx])              for k in meaningful_levels]
+        consist_vals = [round(float(node_consistency[k][node_idx]), 6)   for k in meaningful_levels]
+        row = [node_idx, roi_name, round(float(beh_degree[node_idx]), 6)] + block_vals + consist_vals
         writer.writerow(row)
 log_msg(f"| UPDATE | ROI block-assignment table saved ({len(node_names)} ROIs × "
         f"{len(meaningful_levels)} levels) → {roi_level_path}")
@@ -341,7 +359,7 @@ for level_idx in meaningful_levels:
 # ---- Graph visualisation (graph_tool draw, level-0 modal partition) ---- #
 print("\nGenerating graph visualisation...")
 
-_coord_data = np.loadtxt(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_circle_coords__sorted.txt'),
+_coord_data = np.loadtxt(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_circle_coords_sorted.txt'),
                          delimiter='\t', skiprows=1, usecols=(0, 1))
 
 
@@ -371,16 +389,31 @@ for v in g.vertices():
 degree_map   = g.degree_property_map("in")
 vertex_sizes = gt.prop_to_size(degree_map, mi=20, ma=50)
 
-# Edge alpha: normalised joint block connectivity strength under level-0 modal partition
-b0       = modal_assignments[meaningful_levels[0]]
-bmat0    = block_connectivity[meaningful_levels[0]]
-bmat_max = bmat0.max() if bmat0.max() > 0 else 1.0
+# Edge alpha: behaviour layer weight for each node pair.
+# Build a lookup by node pair from behaviour layer edges (layer == 0).
+# Cooccurrence edges share the same node pair so they pick up the same weight.
+# Z-scored weights can be negative (below-mean edges); these clip to alpha_min
+# so only edges with meaningful positive behaviour signal are opaque.
+_e_alpha_min   = 0.03
+_e_alpha_gamma = 1.0
 
-edge_alpha_arr = np.array([
-    bmat0[b0[int(e.source())], b0[int(e.target())]] / bmat_max
+beh_weight_lookup = {}
+for e in g.edges():
+    if g.ep.layer[e] == 0:
+        key = (min(int(e.source()), int(e.target())),
+               max(int(e.source()), int(e.target())))
+        beh_weight_lookup[key] = float(g.ep.behaviour_weight[e])
+
+raw_beh = np.array([
+    beh_weight_lookup.get(
+        (min(int(e.source()), int(e.target())),
+         max(int(e.source()), int(e.target()))), 0.0)
     for e in g.edges()
 ])
-edge_alpha_arr = np.clip(edge_alpha_arr, 0.01, 1.0)
+
+clipped  = np.maximum(raw_beh, 0.0)
+w_max    = clipped.max() if clipped.max() > 0 else 1.0
+edge_alpha_arr = _e_alpha_min + (1.0 - _e_alpha_min) * (clipped / w_max) ** _e_alpha_gamma
 
 edge_color = g.new_edge_property("vector<double>")
 for idx, e in enumerate(g.edges()):

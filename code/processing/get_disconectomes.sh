@@ -40,3 +40,27 @@ for f in $FILES; do
       wait -n 2>/dev/null || true
   done
 done
+
+
+
+
+
+###########################
+#                         #
+#  SBM BLOCK CONNECTOMES  # 
+#                         # 
+###########################
+
+
+
+tck="${TEMPLATEDIR}/Tractograms/dTOR_2m_tractogram.tck"
+SCORES="Foreperiod_Long_tau GoNoGo_tau SATO_Accuracy_tau"
+
+
+# ---- 1. get full connectome ---- #
+for score in ${SCORES}; do
+  tck2connectome -force -symmetric -zero_diagonal -quiet -scale_invnodevol \
+    "${tck}" \
+    "/data/SBM_Schaefer2018-400_${score}_singleflip/block_niftis/${score}_parcellation.nii.gz"  \
+    "/data/SBM_Schaefer2018-400_${score}_singleflip/Lvl0_block_connectome_${score}.tsv"
+done
