@@ -222,6 +222,7 @@ for task in TASKS:
 
 
 # ---- per-block mean edge weight, normalized within each block (no z-score) ---- #
+roi_opacity = 0.5
 for task in TASKS:
     graph_path = os.path.join(result_dir, f'SBM_{atlas}_{task}_singleflip', f'SBM_final_graph_{task}.gt')
     adj = utils.load_joint_adjacency(graph_path)
@@ -235,8 +236,15 @@ for task in TASKS:
         if level_col not in rows[0]:
             continue
         block_of_node = np.array([int(row[level_col]) for row in rows])
-        blocks, counts = np.unique(block_of_node, return_counts=True)
-        relevant_blocks = blocks[counts > 1]
+        behaviour_degree = np.array([float(row['behaviour_degree']) for row in rows])
+
+        blocks = np.unique(block_of_node)
+        counts = np.array([(block_of_node == blk).sum() for blk in blocks])
+        block_means = np.array([behaviour_degree[block_of_node == blk].mean() for blk in blocks])
+        mean_std = block_means.std()
+        block_zscores = (block_means - block_means.mean()) / mean_std if mean_std > 0 else np.zeros_like(block_means)
+
+        relevant_blocks = blocks[(block_zscores >= 0) & (counts > 1)]
 
         for blk in relevant_blocks:
             block_img = utils.block_edge_weight_image(adj, block_of_node, blk, atlas_img)
