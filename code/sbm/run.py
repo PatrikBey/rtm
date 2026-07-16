@@ -70,7 +70,7 @@ args.add_argument('--cooccurrence_dist', type=str, default='normal',
                   choices=['normal', 'poisson'],
                   help='Assumed distribution for the cooccurrence layer (default: normal). '
                        'Set to poisson to apply [0,1] rescaling and use discrete-Poisson DL.')
-args.add_argument('--combined_layers', action=argparse.BooleanOptionalAction, default=True,
+args.add_argument('--combined_layers', action=argparse.BooleanOptionalAction, default=False,
                   help='If set (default), threshold both layers jointly so they share the same '
                        'edge structure (intersection). Use --no-combined-layers to threshold each '
                        'layer independently, giving each its own edge set.')
@@ -129,24 +129,30 @@ graph = create_multilayer_graph(adj_matrices, behaviour, node_names, edge_thresh
                                behaviour_dist=args.behaviour_dist,
                                cooccurrence_dist=args.cooccurrence_dist,
                                combined_layers=args.combined_layers)
+
+graph_path = os.path.join(output_dir, f'SBM_graph_{args.score}.gt')
+graph.save(graph_path)
+log_msg(f"| UPDATE | Multilayer graph saved (graph-tool format) → {graph_path}")
+
+
 occ_layer, beh_layer = get_graph_layers(graph)
 
 np.savetxt(os.path.join(output_dir, f'SBM_layer_{args.score}_cooccurrence.txt'), occ_layer, fmt='%.6f')
 np.savetxt(os.path.join(output_dir, f'SBM_layer_{args.score}_behaviour.txt'), beh_layer, fmt='%.6f')
 
-plt.figure(figsize=(8, 5))
-plt.subplot(1, 2, 1)
-plt.imshow(np.where(occ_layer == 0, np.nan, occ_layer), cmap='plasma')
-plt.colorbar()
-plt.title('Cooccurrence layer')
-plt.subplot(1, 2, 2)
-plt.imshow(np.where(beh_layer == 0, np.nan, beh_layer), cmap='plasma')
-plt.colorbar()
-plt.title('Behaviour layer')
-plt.tight_layout()
-plt.savefig(os.path.join(output_dir, f'RF_weighted_nested_graph_layers_{args.score}.png'),
-            dpi=150, bbox_inches='tight')
-plt.close()
+# plt.figure(figsize=(8, 5))
+# plt.subplot(1, 2, 1)
+# plt.imshow(np.where(occ_layer == 0, np.nan, occ_layer), cmap='plasma')
+# plt.colorbar()
+# plt.title('Cooccurrence layer')
+# plt.subplot(1, 2, 2)
+# plt.imshow(np.where(beh_layer == 0, np.nan, beh_layer), cmap='plasma')
+# plt.colorbar()
+# plt.title('Behaviour layer')
+# plt.tight_layout()
+# plt.savefig(os.path.join(output_dir, f'RF_weighted_nested_graph_layers_{args.score}.png'),
+#             dpi=150, bbox_inches='tight')
+# plt.close()
 
 
 
@@ -182,6 +188,10 @@ meaningful_levels = real_results['meaningful_levels']
 modal_assignments  = real_results['modal_assignments']   # {level: (n_nodes,) array}
 block_connectivity = real_results['block_connectivity']  # {level: (B×B) joint matrix}
 node_consistency   = real_results['node_consistency']    # {level: (n_nodes,) array in [0,1]}
+
+final_graph_path = os.path.join(output_dir, f'SBM_final_graph_{args.score}.gt')
+g.save(final_graph_path)
+log_msg(f"| UPDATE | Final MCMC graph saved (graph-tool format) → {final_graph_path}")
 
 
 
@@ -236,26 +246,41 @@ log_msg(f"| UPDATE | Entropy / DL trajectory saved "
 # Rows = ROIs, columns = meaningful level indices.
 # Values are 0-indexed block IDs from the modal partition.
 
-# Weighted degree in the behaviour layer (layer 0) per node.
+# Weighted degree per node, behaviour layer (layer 0) and cooccurrence layer (layer 1).
 beh_degree = np.zeros(g.num_vertices())
+occ_degree = np.zeros(g.num_vertices())
 for e in g.edges():
     if g.ep.layer[e] == 0:
         w = g.ep.behaviour_weight[e]
         beh_degree[int(e.source())] += w
         beh_degree[int(e.target())] += w
+    else:
+        w = g.ep.cooccurrence_weight[e]
+        occ_degree[int(e.source())] += w
+        occ_degree[int(e.target())] += w
+
+# Posterior mean/variance of each node's own-block internal edge mass
+# (diagonal of edge_mean / edge_var — accumulated over the accumulation window).
+block_edge_mean = np.diag(real_results['edge_mean'])
+block_edge_var  = np.diag(real_results['edge_var'])
 
 import csv
 roi_level_path  = os.path.join(output_dir, f'roi_block_assignments_{args.score}.csv')
 level_cols      = [f'level_{k}'       for k in meaningful_levels]
 consist_cols    = [f'consistency_{k}' for k in meaningful_levels]
-header          = ['roi_index', 'roi_name', 'behaviour_degree'] + level_cols + consist_cols
+header          = ['roi_index', 'roi_name', 'behaviour_degree', 'cooccurrence_degree',
+                   'block_edge_mean', 'block_edge_var'] + level_cols + consist_cols
 with open(roi_level_path, 'w', newline='') as fh:
     writer = csv.writer(fh)
     writer.writerow(header)
     for node_idx, roi_name in enumerate(node_names):
         block_vals   = [int(modal_assignments[k][node_idx])              for k in meaningful_levels]
         consist_vals = [round(float(node_consistency[k][node_idx]), 6)   for k in meaningful_levels]
-        row = [node_idx, roi_name, round(float(beh_degree[node_idx]), 6)] + block_vals + consist_vals
+        row = [node_idx, roi_name,
+               round(float(beh_degree[node_idx]), 6),
+               round(float(occ_degree[node_idx]), 6),
+               round(float(block_edge_mean[node_idx]), 6),
+               round(float(block_edge_var[node_idx]), 6)] + block_vals + consist_vals
         writer.writerow(row)
 log_msg(f"| UPDATE | ROI block-assignment table saved ({len(node_names)} ROIs × "
         f"{len(meaningful_levels)} levels) → {roi_level_path}")
@@ -266,18 +291,18 @@ log_msg(f"| UPDATE | ROI block-assignment table saved ({len(node_names)} ROIs ×
 #        VISUALISATIONS         #
 #################################
 
-# ---- Node colours by anatomical location ---- #
-# Locations are a fixed mapping from atlas ROIs to canonical anatomical areas —
-# consistent across atlases, so colours are hardcoded to those areas.
-loc_colours = [
-    'mediumvioletred', 'deeppink', 'indigo', 'mediumslateblue', 'steelblue',
-    'deepskyblue', 'teal', 'mediumturquoise', 'darkgreen', 'limegreen',
-    'olivedrab', 'yellowgreen', 'darkorange', 'gold', 'firebrick', 'lightcoral'
-]
-locations        = [f'{loc}_L' if idx < dim / 2 else f'{loc}_R'
-                    for idx, loc in enumerate(locations)]
-unique_locations = sorted(set(locations))
-node_color       = [loc_colours[unique_locations.index(loc)] for loc in locations]
+# # ---- Node colours by anatomical location ---- #
+# # Locations are a fixed mapping from atlas ROIs to canonical anatomical areas —
+# # consistent across atlases, so colours are hardcoded to those areas.
+# loc_colours = [
+#     'mediumvioletred', 'deeppink', 'indigo', 'mediumslateblue', 'steelblue',
+#     'deepskyblue', 'teal', 'mediumturquoise', 'darkgreen', 'limegreen',
+#     'olivedrab', 'yellowgreen', 'darkorange', 'gold', 'firebrick', 'lightcoral'
+# ]
+# locations        = [f'{loc}_L' if idx < dim / 2 else f'{loc}_R'
+#                     for idx, loc in enumerate(locations)]
+# unique_locations = sorted(set(locations))
+# node_color       = [loc_colours[unique_locations.index(loc)] for loc in locations]
 
 
 # ---- Entropy trajectory ---- #
@@ -328,308 +353,308 @@ log_msg(f"| UPDATE | Entropy trajectory saved "
         f"(converged={converged}, iter={conv_iter}, {n_conv} accumulation samples)")
 plt.close()
 
-# plt.show()
+# # plt.show()
 
 
-# ---- Block connectivity heatmaps (one figure per meaningful level) ---- #
-# Single joint matrix per level — model-internal mrs, joint across both layers.
-from matplotlib.colors import to_rgba
+# # ---- Block connectivity heatmaps (one figure per meaningful level) ---- #
+# # Single joint matrix per level — model-internal mrs, joint across both layers.
+# from matplotlib.colors import to_rgba
 
-for level_idx in meaningful_levels:
-    bmat = block_connectivity[level_idx]
-    b    = modal_assignments[level_idx]
-    n_b  = int(b.max()) + 1
-    fig, ax = plt.subplots(figsize=(7, 6))
-    im = ax.imshow(np.where(bmat == 0, np.nan, bmat), cmap='plasma', interpolation='nearest')
-    plt.colorbar(im, ax=ax, label='Mean block-to-block edge count (mrs)')
-    ax.set_title(f'Joint Block Connectivity\nLevel {level_idx} — {n_b} blocks', fontsize=11)
-    ax.set_xlabel('Block index')
-    ax.set_ylabel('Block index')
-    ax.set_xticks(range(n_b))
-    ax.set_yticks(range(n_b))
-    plt.suptitle(f'Block Connectivity — Level {level_idx} Modal Partition  |  {args.score}',
-                 fontsize=12, fontweight='bold')
-    plt.tight_layout()
-    plt.savefig(f'{output_dir}/SBM_block_matrix_level{level_idx}_{args.score}.png',
-                dpi=150, bbox_inches='tight')
-    log_msg(f"| UPDATE | Block matrix saved for level {level_idx}")
-    plt.close()
-
-
-# ---- Graph visualisation (graph_tool draw, level-0 modal partition) ---- #
-print("\nGenerating graph visualisation...")
-
-_coord_data = np.loadtxt(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_circle_coords_sorted.txt'),
-                         delimiter='\t', skiprows=1, usecols=(0, 1))
+# for level_idx in meaningful_levels:
+#     bmat = block_connectivity[level_idx]
+#     b    = modal_assignments[level_idx]
+#     n_b  = int(b.max()) + 1
+#     fig, ax = plt.subplots(figsize=(7, 6))
+#     im = ax.imshow(np.where(bmat == 0, np.nan, bmat), cmap='plasma', interpolation='nearest')
+#     plt.colorbar(im, ax=ax, label='Mean block-to-block edge count (mrs)')
+#     ax.set_title(f'Joint Block Connectivity\nLevel {level_idx} — {n_b} blocks', fontsize=11)
+#     ax.set_xlabel('Block index')
+#     ax.set_ylabel('Block index')
+#     ax.set_xticks(range(n_b))
+#     ax.set_yticks(range(n_b))
+#     plt.suptitle(f'Block Connectivity — Level {level_idx} Modal Partition  |  {args.score}',
+#                  fontsize=12, fontweight='bold')
+#     plt.tight_layout()
+#     plt.savefig(f'{output_dir}/SBM_block_matrix_level{level_idx}_{args.score}.png',
+#                 dpi=150, bbox_inches='tight')
+#     log_msg(f"| UPDATE | Block matrix saved for level {level_idx}")
+#     plt.close()
 
 
-pos = g.new_vertex_property("vector<double>")
-for v in g.vertices():
-    pos[v] = _coord_data[int(v)].tolist()
+# # ---- Graph visualisation (graph_tool draw, level-0 modal partition) ---- #
+# print("\nGenerating graph visualisation...")
 
-unique_location_names   = sorted(set(locations))
-location_name_to_idx    = {name: idx for idx, name in enumerate(unique_location_names)}
-n_locations             = len(unique_location_names)
-
-distinct_colors = [to_rgba(c) for c in loc_colours]
-cmap            = ListedColormap(distinct_colors)
-norm            = Normalize(vmin=0, vmax=max(n_locations - 1, 1))
-
-vertex_color = g.new_vertex_property("vector<double>")
-vertex_shape = g.new_vertex_property("int")
-for v in g.vertices():
-    node_idx     = int(v)
-    location     = locations[node_idx]
-    side         = location.rsplit('_', 1)[1]
-    location_idx = location_name_to_idx[location]
-    rgba         = cmap(norm(location_idx))
-    vertex_color[v] = rgba
-    vertex_shape[v] = 0 if side == 'L' else 1
-
-degree_map   = g.degree_property_map("in")
-vertex_sizes = gt.prop_to_size(degree_map, mi=20, ma=50)
-
-# Edge alpha: behaviour layer weight for each node pair.
-# Build a lookup by node pair from behaviour layer edges (layer == 0).
-# Cooccurrence edges share the same node pair so they pick up the same weight.
-# Z-scored weights can be negative (below-mean edges); these clip to alpha_min
-# so only edges with meaningful positive behaviour signal are opaque.
-_e_alpha_min   = 0.03
-_e_alpha_gamma = 1.0
-
-beh_weight_lookup = {}
-for e in g.edges():
-    if g.ep.layer[e] == 0:
-        key = (min(int(e.source()), int(e.target())),
-               max(int(e.source()), int(e.target())))
-        beh_weight_lookup[key] = float(g.ep.behaviour_weight[e])
-
-raw_beh = np.array([
-    beh_weight_lookup.get(
-        (min(int(e.source()), int(e.target())),
-         max(int(e.source()), int(e.target()))), 0.0)
-    for e in g.edges()
-])
-
-clipped  = np.maximum(raw_beh, 0.0)
-w_max    = clipped.max() if clipped.max() > 0 else 1.0
-edge_alpha_arr = _e_alpha_min + (1.0 - _e_alpha_min) * (clipped / w_max) ** _e_alpha_gamma
-
-edge_color = g.new_edge_property("vector<double>")
-for idx, e in enumerate(g.edges()):
-    src_c   = vertex_color[e.source()]
-    tgt_c   = vertex_color[e.target()]
-    avg_rgb = [(src_c[c] + tgt_c[c]) / 2 for c in range(3)]
-    avg_rgb.append(float(edge_alpha_arr[idx]))
-    edge_color[e] = tuple(avg_rgb)
-
-state_nested.draw(
-    pos=pos,
-    vertex_fill_color=vertex_color,
-    vertex_shape=vertex_shape,
-    vertex_size=vertex_sizes,
-    vertex_pen_width=0.5,
-    edge_color=edge_color,
-    edge_pen_width=gt.prop_to_size(g.ep.behaviour_weight, mi=0.5, ma=3),
-    edge_gradient=[],
-    vertex_text=g.vp.label,
-    vertex_text_color='black',
-    vertex_text_position=0,
-    vertex_font_size=10,
-    output=os.path.join(output_dir, f"RF_weighted_nested_block_state_draw_{args.score}.png"),
-    output_size=(1200, 1200)
-)
-log_msg(f"| UPDATE | Graph visualisation saved")
+# _coord_data = np.loadtxt(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_circle_coords_sorted.txt'),
+#                          delimiter='\t', skiprows=1, usecols=(0, 1))
 
 
-# ---- Location legend ---- #
-fig, ax = plt.subplots(figsize=(3, 2))
-legend_elements = []
-for loc_idx, location_name in enumerate(unique_location_names):
-    rgba   = cmap(norm(loc_idx))
-    n_node = np.sum(np.array(locations) == location_name)
-    marker = 'o' if location_name.endswith('_L') else '^'
-    legend_elements.append(
-        Line2D([0], [0], marker=marker, color='w',
-               markerfacecolor=rgba, markersize=10,
-               markeredgecolor='black', markeredgewidth=1.5,
-               label=f"{location_name} ({n_node} nodes)")
-    )
+# pos = g.new_vertex_property("vector<double>")
+# for v in g.vertices():
+#     pos[v] = _coord_data[int(v)].tolist()
 
-ax.legend(handles=legend_elements, loc='center', fontsize=10, frameon=True,
-          title="Node colour by location (circles=L, triangles=R)",
-          title_fontsize=12, ncol=2, fancybox=True, shadow=True)
-ax.axis('off')
-plt.tight_layout()
-plt.savefig(os.path.join(output_dir, f'RF_weighted_nested_location_legend_{args.score}.png'),
-            dpi=150, bbox_inches='tight')
-plt.close()
+# unique_location_names   = sorted(set(locations))
+# location_name_to_idx    = {name: idx for idx, name in enumerate(unique_location_names)}
+# n_locations             = len(unique_location_names)
+
+# distinct_colors = [to_rgba(c) for c in loc_colours]
+# cmap            = ListedColormap(distinct_colors)
+# norm            = Normalize(vmin=0, vmax=max(n_locations - 1, 1))
+
+# vertex_color = g.new_vertex_property("vector<double>")
+# vertex_shape = g.new_vertex_property("int")
+# for v in g.vertices():
+#     node_idx     = int(v)
+#     location     = locations[node_idx]
+#     side         = location.rsplit('_', 1)[1]
+#     location_idx = location_name_to_idx[location]
+#     rgba         = cmap(norm(location_idx))
+#     vertex_color[v] = rgba
+#     vertex_shape[v] = 0 if side == 'L' else 1
+
+# degree_map   = g.degree_property_map("in")
+# vertex_sizes = gt.prop_to_size(degree_map, mi=20, ma=50)
+
+# # Edge alpha: behaviour layer weight for each node pair.
+# # Build a lookup by node pair from behaviour layer edges (layer == 0).
+# # Cooccurrence edges share the same node pair so they pick up the same weight.
+# # Z-scored weights can be negative (below-mean edges); these clip to alpha_min
+# # so only edges with meaningful positive behaviour signal are opaque.
+# _e_alpha_min   = 0.03
+# _e_alpha_gamma = 1.0
+
+# beh_weight_lookup = {}
+# for e in g.edges():
+#     if g.ep.layer[e] == 0:
+#         key = (min(int(e.source()), int(e.target())),
+#                max(int(e.source()), int(e.target())))
+#         beh_weight_lookup[key] = float(g.ep.behaviour_weight[e])
+
+# raw_beh = np.array([
+#     beh_weight_lookup.get(
+#         (min(int(e.source()), int(e.target())),
+#          max(int(e.source()), int(e.target()))), 0.0)
+#     for e in g.edges()
+# ])
+
+# clipped  = np.maximum(raw_beh, 0.0)
+# w_max    = clipped.max() if clipped.max() > 0 else 1.0
+# edge_alpha_arr = _e_alpha_min + (1.0 - _e_alpha_min) * (clipped / w_max) ** _e_alpha_gamma
+
+# edge_color = g.new_edge_property("vector<double>")
+# for idx, e in enumerate(g.edges()):
+#     src_c   = vertex_color[e.source()]
+#     tgt_c   = vertex_color[e.target()]
+#     avg_rgb = [(src_c[c] + tgt_c[c]) / 2 for c in range(3)]
+#     avg_rgb.append(float(edge_alpha_arr[idx]))
+#     edge_color[e] = tuple(avg_rgb)
+
+# state_nested.draw(
+#     pos=pos,
+#     vertex_fill_color=vertex_color,
+#     vertex_shape=vertex_shape,
+#     vertex_size=vertex_sizes,
+#     vertex_pen_width=0.5,
+#     edge_color=edge_color,
+#     edge_pen_width=gt.prop_to_size(g.ep.behaviour_weight, mi=0.5, ma=3),
+#     edge_gradient=[],
+#     vertex_text=g.vp.label,
+#     vertex_text_color='black',
+#     vertex_text_position=0,
+#     vertex_font_size=10,
+#     output=os.path.join(output_dir, f"RF_weighted_nested_block_state_draw_{args.score}.png"),
+#     output_size=(1200, 1200)
+# )
+# log_msg(f"| UPDATE | Graph visualisation saved")
 
 
-# ---- Connectome plot: three-ring hierarchical circle ---- #
-#
-# Layout:
-#   Outer ring   — anatomical nodes at atlas coordinates, coloureds by location,
-#                  shaped by hemisphere (circles = L, triangles = R).
-#   Middle ring  — level-0 block nodes, evenly spaced at 66% of outer radius.
-#                  Spokes connect each outer node to its level-0 block (Bézier,
-#                  control point = outer-circle point at the block's radial angle).
-#   Inner ring   — level-1 block nodes, evenly spaced at 35% of outer radius.
-#                  Straight edges connect each level-0 block node to its level-2
-#                  block (majority-vote mapping over member nodes).
+# # ---- Location legend ---- #
+# fig, ax = plt.subplots(figsize=(3, 2))
+# legend_elements = []
+# for loc_idx, location_name in enumerate(unique_location_names):
+#     rgba   = cmap(norm(loc_idx))
+#     n_node = np.sum(np.array(locations) == location_name)
+#     marker = 'o' if location_name.endswith('_L') else '^'
+#     legend_elements.append(
+#         Line2D([0], [0], marker=marker, color='w',
+#                markerfacecolor=rgba, markersize=10,
+#                markeredgecolor='black', markeredgewidth=1.5,
+#                label=f"{location_name} ({n_node} nodes)")
+#     )
 
-outer_coord_data = np.loadtxt(
-    os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_circle_coords_sorted.txt'),
-    delimiter='\t', skiprows=1, usecols=(0, 1)
-).astype(float)
+# ax.legend(handles=legend_elements, loc='center', fontsize=10, frameon=True,
+#           title="Node colour by location (circles=L, triangles=R)",
+#           title_fontsize=12, ncol=2, fancybox=True, shadow=True)
+# ax.axis('off')
+# plt.tight_layout()
+# plt.savefig(os.path.join(output_dir, f'RF_weighted_nested_location_legend_{args.score}.png'),
+#             dpi=150, bbox_inches='tight')
+# plt.close()
 
-b0   = modal_assignments[meaningful_levels[0]]
-n_b0 = int(b0.max()) + 1
 
-# Inner ring uses the second meaningful level if it exists; otherwise omit it.
-_has_inner = len(meaningful_levels) >= 2
-b1   = modal_assignments[meaningful_levels[1]] if _has_inner else None
-n_b1 = int(b1.max()) + 1                       if _has_inner else 0
+# # ---- Connectome plot: three-ring hierarchical circle ---- #
+# #
+# # Layout:
+# #   Outer ring   — anatomical nodes at atlas coordinates, coloureds by location,
+# #                  shaped by hemisphere (circles = L, triangles = R).
+# #   Middle ring  — level-0 block nodes, evenly spaced at 66% of outer radius.
+# #                  Spokes connect each outer node to its level-0 block (Bézier,
+# #                  control point = outer-circle point at the block's radial angle).
+# #   Inner ring   — level-1 block nodes, evenly spaced at 35% of outer radius.
+# #                  Straight edges connect each level-0 block node to its level-2
+# #                  block (majority-vote mapping over member nodes).
 
-# Outer circle geometry
-cx_outer = outer_coord_data[:, 0].mean()
-cy_outer = outer_coord_data[:, 1].mean()
-r_outer  = np.hypot(outer_coord_data[:, 0] - cx_outer,
-                    outer_coord_data[:, 1] - cy_outer).max()
-r_middle = r_outer * 0.66   # level-0 blocks
-r_inner  = r_outer * 0.35   # level-2 blocks
+# outer_coord_data = np.loadtxt(
+#     os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_circle_coords_sorted.txt'),
+#     delimiter='\t', skiprows=1, usecols=(0, 1)
+# ).astype(float)
 
-# Middle ring: level-0 block positions
-angles_b0 = np.linspace(0, 2 * np.pi, n_b0, endpoint=False)
-middle_xy = np.column_stack([
-    cx_outer + r_middle * np.cos(angles_b0),
-    cy_outer + r_middle * np.sin(angles_b0)
-])
+# b0   = modal_assignments[meaningful_levels[0]]
+# n_b0 = int(b0.max()) + 1
 
-# Bézier control points for outer→middle spokes
-ctrl_xy = np.column_stack([
-    cx_outer + r_outer * np.cos(angles_b0),
-    cy_outer + r_outer * np.sin(angles_b0)
-])
+# # Inner ring uses the second meaningful level if it exists; otherwise omit it.
+# _has_inner = len(meaningful_levels) >= 2
+# b1   = modal_assignments[meaningful_levels[1]] if _has_inner else None
+# n_b1 = int(b1.max()) + 1                       if _has_inner else 0
 
-# Inner ring: second meaningful level block positions (omitted if only one level)
-if _has_inner:
-    angles_b1 = np.linspace(0, 2 * np.pi, n_b1, endpoint=False)
-    inner_xy  = np.column_stack([
-        cx_outer + r_inner * np.cos(angles_b1),
-        cy_outer + r_inner * np.sin(angles_b1)
-    ])
-    b0_to_b1 = np.zeros(n_b0, dtype=int)
-    for blk0 in range(n_b0):
-        nodes_in = np.where(b0 == blk0)[0]
-        if nodes_in.size > 0:
-            b0_to_b1[blk0] = int(np.bincount(b1[nodes_in], minlength=n_b1).argmax())
-else:
-    inner_xy = None
-    b0_to_b1 = None
+# # Outer circle geometry
+# cx_outer = outer_coord_data[:, 0].mean()
+# cy_outer = outer_coord_data[:, 1].mean()
+# r_outer  = np.hypot(outer_coord_data[:, 0] - cx_outer,
+#                     outer_coord_data[:, 1] - cy_outer).max()
+# r_middle = r_outer * 0.66   # level-0 blocks
+# r_inner  = r_outer * 0.35   # level-2 blocks
 
-# Normalise behavioural weighted degree to [alpha_min, 1.0] for node/spoke alpha.
-# A power transform (gamma > 1) strongly compresses low-degree nodes toward
-# alpha_min so they are barely visible, while high-degree nodes stay opaque.
-_deg_min    = float(beh_degree.min())
-_deg_max    = float(beh_degree.max())
-_deg_range  = _deg_max - _deg_min if _deg_max > _deg_min else 1.0
-_alpha_min  = 0.03
-_alpha_gamma = 1.0   # increase to push low-degree nodes further toward invisible
-log_msg(f"| UPDATE | Behaviour degree: "
-        f"min={_deg_min:.3f}  max={_deg_max:.3f}  range={_deg_range:.3f}")
+# # Middle ring: level-0 block positions
+# angles_b0 = np.linspace(0, 2 * np.pi, n_b0, endpoint=False)
+# middle_xy = np.column_stack([
+#     cx_outer + r_middle * np.cos(angles_b0),
+#     cy_outer + r_middle * np.sin(angles_b0)
+# ])
 
-t_bez = np.linspace(0, 1, 80)
-idx_L = [i for i, loc in enumerate(locations) if loc.endswith('_L')]
-idx_R = [i for i, loc in enumerate(locations) if loc.endswith('_R')]
+# # Bézier control points for outer→middle spokes
+# ctrl_xy = np.column_stack([
+#     cx_outer + r_outer * np.cos(angles_b0),
+#     cy_outer + r_outer * np.sin(angles_b0)
+# ])
 
-n_cols    = min(n_b0, 4)
-n_rows    = int(np.ceil(n_b0 / n_cols))
-fig, axes = plt.subplots(n_rows, n_cols,
-                         figsize=(5.5 * n_cols, 5.5 * n_rows),
-                         squeeze=False)
-axes_flat = axes.flatten()
+# # Inner ring: second meaningful level block positions (omitted if only one level)
+# if _has_inner:
+#     angles_b1 = np.linspace(0, 2 * np.pi, n_b1, endpoint=False)
+#     inner_xy  = np.column_stack([
+#         cx_outer + r_inner * np.cos(angles_b1),
+#         cy_outer + r_inner * np.sin(angles_b1)
+#     ])
+#     b0_to_b1 = np.zeros(n_b0, dtype=int)
+#     for blk0 in range(n_b0):
+#         nodes_in = np.where(b0 == blk0)[0]
+#         if nodes_in.size > 0:
+#             b0_to_b1[blk0] = int(np.bincount(b1[nodes_in], minlength=n_b1).argmax())
+# else:
+#     inner_xy = None
+#     b0_to_b1 = None
 
-for blk_feat in range(n_b0):
-    ax = axes_flat[blk_feat]
-    ax.set_aspect('equal')
-    ax.axis('off')
-    members     = np.where(b0 == blk_feat)[0]
-    non_members = np.where(b0 != blk_feat)[0]
-    # ---- Spokes: outer node → its level-0 block node ---- #
-    # Alpha = normalised behavioural weighted degree.
-    # High-degree nodes are opaque; low-degree nodes are transparent.
-    for node_idx in members:
-        x1, y1    = outer_coord_data[node_idx]
-        x2, y2    = middle_xy[blk_feat]
-        cpx, cpy  = ctrl_xy[blk_feat]
-        alpha_node = float(_alpha_min + (1.0 - _alpha_min) *
-                           ((beh_degree[node_idx] - _deg_min) / _deg_range) ** _alpha_gamma)
-        xc = (1 - t_bez)**2 * x1 + 2*(1 - t_bez)*t_bez * cpx + t_bez**2 * x2
-        yc = (1 - t_bez)**2 * y1 + 2*(1 - t_bez)*t_bez * cpy + t_bez**2 * y2
-        ax.plot(xc, yc, color=node_color[node_idx],
-                alpha=alpha_node, linewidth=0.7, zorder=2)
-    # ---- Middle→inner edges and inner ring (only if a second level exists) ---- #
-    if _has_inner:
-        for blk0 in range(n_b0):
-            blk1 = int(b0_to_b1[blk0])
-            ax.plot([middle_xy[blk0, 0], inner_xy[blk1, 0]],
-                    [middle_xy[blk0, 1], inner_xy[blk1, 1]],
-                    color='dimgray', alpha=0.5, linewidth=1.5, zorder=3)
-        ax.scatter(inner_xy[:, 0], inner_xy[:, 1],
-                   s=150, c='white', edgecolors='dimgray', linewidths=1.5, zorder=4)
-        for b in range(n_b1):
-            ax.text(inner_xy[b, 0], inner_xy[b, 1], str(b),
-                    ha='center', va='center', fontsize=8, fontweight='bold', zorder=5)
-    # ---- Middle ring: level-0 block nodes (featured block highlighted) ---- #
-    c_mid  = ['gold' if b == blk_feat else 'white' for b in range(n_b0)]
-    lw_mid = [2.5   if b == blk_feat else 1.5     for b in range(n_b0)]
-    ax.scatter(middle_xy[:, 0], middle_xy[:, 1],
-               s=200, c=c_mid, edgecolors='dimgray', linewidths=lw_mid, zorder=6)
-    for b in range(n_b0):
-        ax.text(middle_xy[b, 0], middle_xy[b, 1], str(b),
-                ha='center', va='center', fontsize=8, fontweight='bold', zorder=7)
-    # ---- Outer nodes: non-members grayed, members colored by location ---- #
-    # Member node alpha matches spoke alpha (normalised behavioural degree).
-    nm_L = [i for i in non_members if locations[i].endswith('_L')]
-    nm_R = [i for i in non_members if locations[i].endswith('_R')]
-    m_L  = [i for i in members     if locations[i].endswith('_L')]
-    m_R  = [i for i in members     if locations[i].endswith('_R')]
-    def _node_rgba(node_idx):
-        a   = _alpha_min + (1.0 - _alpha_min) * \
-              ((beh_degree[node_idx] - _deg_min) / _deg_range) ** _alpha_gamma
-        r, g, b, _ = to_rgba(node_color[node_idx])
-        return (r, g, b, float(a))
-    if nm_L:
-        ax.scatter(outer_coord_data[nm_L, 0], outer_coord_data[nm_L, 1],
-                   s=20, c='lightgray', marker='o', edgecolors='none',
-                   alpha=0.3, zorder=6)
-    if nm_R:
-        ax.scatter(outer_coord_data[nm_R, 0], outer_coord_data[nm_R, 1],
-                   s=20, c='lightgray', marker='^', edgecolors='none',
-                   alpha=0.3, zorder=6)
-    if m_L:
-        ax.scatter(outer_coord_data[m_L, 0], outer_coord_data[m_L, 1],
-                   s=80, c=[_node_rgba(i) for i in m_L],
-                   marker='o', edgecolors='none', zorder=8)
-    if m_R:
-        ax.scatter(outer_coord_data[m_R, 0], outer_coord_data[m_R, 1],
-                   s=80, c=[_node_rgba(i) for i in m_R],
-                   marker='^', edgecolors='none', zorder=8)
-    ax.set_title(f'Block {blk_feat}  ({len(members)} nodes)',
-                 fontsize=10, fontweight='bold')
+# # Normalise behavioural weighted degree to [alpha_min, 1.0] for node/spoke alpha.
+# # A power transform (gamma > 1) strongly compresses low-degree nodes toward
+# # alpha_min so they are barely visible, while high-degree nodes stay opaque.
+# _deg_min    = float(beh_degree.min())
+# _deg_max    = float(beh_degree.max())
+# _deg_range  = _deg_max - _deg_min if _deg_max > _deg_min else 1.0
+# _alpha_min  = 0.03
+# _alpha_gamma = 1.0   # increase to push low-degree nodes further toward invisible
+# log_msg(f"| UPDATE | Behaviour degree: "
+#         f"min={_deg_min:.3f}  max={_deg_max:.3f}  range={_deg_range:.3f}")
 
-# Hide unused subplot panels
-for ax in axes_flat[n_b0:]:
-    ax.set_visible(False)
+# t_bez = np.linspace(0, 1, 80)
+# idx_L = [i for i, loc in enumerate(locations) if loc.endswith('_L')]
+# idx_R = [i for i, loc in enumerate(locations) if loc.endswith('_R')]
 
-fig.suptitle(f'Level-0 Block Connectome — per block  |  {args.score}',
-             fontsize=13, fontweight='bold')
-plt.tight_layout()
-plt.savefig(os.path.join(output_dir, f'SBM_block_connectome_per_block_{args.score}.svg'),
-            dpi=150, bbox_inches='tight')
+# n_cols    = min(n_b0, 4)
+# n_rows    = int(np.ceil(n_b0 / n_cols))
+# fig, axes = plt.subplots(n_rows, n_cols,
+#                          figsize=(5.5 * n_cols, 5.5 * n_rows),
+#                          squeeze=False)
+# axes_flat = axes.flatten()
 
-plt.close()
+# for blk_feat in range(n_b0):
+#     ax = axes_flat[blk_feat]
+#     ax.set_aspect('equal')
+#     ax.axis('off')
+#     members     = np.where(b0 == blk_feat)[0]
+#     non_members = np.where(b0 != blk_feat)[0]
+#     # ---- Spokes: outer node → its level-0 block node ---- #
+#     # Alpha = normalised behavioural weighted degree.
+#     # High-degree nodes are opaque; low-degree nodes are transparent.
+#     for node_idx in members:
+#         x1, y1    = outer_coord_data[node_idx]
+#         x2, y2    = middle_xy[blk_feat]
+#         cpx, cpy  = ctrl_xy[blk_feat]
+#         alpha_node = float(_alpha_min + (1.0 - _alpha_min) *
+#                            ((beh_degree[node_idx] - _deg_min) / _deg_range) ** _alpha_gamma)
+#         xc = (1 - t_bez)**2 * x1 + 2*(1 - t_bez)*t_bez * cpx + t_bez**2 * x2
+#         yc = (1 - t_bez)**2 * y1 + 2*(1 - t_bez)*t_bez * cpy + t_bez**2 * y2
+#         ax.plot(xc, yc, color=node_color[node_idx],
+#                 alpha=alpha_node, linewidth=0.7, zorder=2)
+#     # ---- Middle→inner edges and inner ring (only if a second level exists) ---- #
+#     if _has_inner:
+#         for blk0 in range(n_b0):
+#             blk1 = int(b0_to_b1[blk0])
+#             ax.plot([middle_xy[blk0, 0], inner_xy[blk1, 0]],
+#                     [middle_xy[blk0, 1], inner_xy[blk1, 1]],
+#                     color='dimgray', alpha=0.5, linewidth=1.5, zorder=3)
+#         ax.scatter(inner_xy[:, 0], inner_xy[:, 1],
+#                    s=150, c='white', edgecolors='dimgray', linewidths=1.5, zorder=4)
+#         for b in range(n_b1):
+#             ax.text(inner_xy[b, 0], inner_xy[b, 1], str(b),
+#                     ha='center', va='center', fontsize=8, fontweight='bold', zorder=5)
+#     # ---- Middle ring: level-0 block nodes (featured block highlighted) ---- #
+#     c_mid  = ['gold' if b == blk_feat else 'white' for b in range(n_b0)]
+#     lw_mid = [2.5   if b == blk_feat else 1.5     for b in range(n_b0)]
+#     ax.scatter(middle_xy[:, 0], middle_xy[:, 1],
+#                s=200, c=c_mid, edgecolors='dimgray', linewidths=lw_mid, zorder=6)
+#     for b in range(n_b0):
+#         ax.text(middle_xy[b, 0], middle_xy[b, 1], str(b),
+#                 ha='center', va='center', fontsize=8, fontweight='bold', zorder=7)
+#     # ---- Outer nodes: non-members grayed, members colored by location ---- #
+#     # Member node alpha matches spoke alpha (normalised behavioural degree).
+#     nm_L = [i for i in non_members if locations[i].endswith('_L')]
+#     nm_R = [i for i in non_members if locations[i].endswith('_R')]
+#     m_L  = [i for i in members     if locations[i].endswith('_L')]
+#     m_R  = [i for i in members     if locations[i].endswith('_R')]
+#     def _node_rgba(node_idx):
+#         a   = _alpha_min + (1.0 - _alpha_min) * \
+#               ((beh_degree[node_idx] - _deg_min) / _deg_range) ** _alpha_gamma
+#         r, g, b, _ = to_rgba(node_color[node_idx])
+#         return (r, g, b, float(a))
+#     if nm_L:
+#         ax.scatter(outer_coord_data[nm_L, 0], outer_coord_data[nm_L, 1],
+#                    s=20, c='lightgray', marker='o', edgecolors='none',
+#                    alpha=0.3, zorder=6)
+#     if nm_R:
+#         ax.scatter(outer_coord_data[nm_R, 0], outer_coord_data[nm_R, 1],
+#                    s=20, c='lightgray', marker='^', edgecolors='none',
+#                    alpha=0.3, zorder=6)
+#     if m_L:
+#         ax.scatter(outer_coord_data[m_L, 0], outer_coord_data[m_L, 1],
+#                    s=80, c=[_node_rgba(i) for i in m_L],
+#                    marker='o', edgecolors='none', zorder=8)
+#     if m_R:
+#         ax.scatter(outer_coord_data[m_R, 0], outer_coord_data[m_R, 1],
+#                    s=80, c=[_node_rgba(i) for i in m_R],
+#                    marker='^', edgecolors='none', zorder=8)
+#     ax.set_title(f'Block {blk_feat}  ({len(members)} nodes)',
+#                  fontsize=10, fontweight='bold')
+
+# # Hide unused subplot panels
+# for ax in axes_flat[n_b0:]:
+#     ax.set_visible(False)
+
+# fig.suptitle(f'Level-0 Block Connectome — per block  |  {args.score}',
+#              fontsize=13, fontweight='bold')
+# plt.tight_layout()
+# plt.savefig(os.path.join(output_dir, f'SBM_block_connectome_per_block_{args.score}.svg'),
+#             dpi=150, bbox_inches='tight')
+
+# plt.close()
 
 
 #################################
@@ -643,6 +668,14 @@ plt.close()
 # node_names[v-1] (1-indexed, matching the atlas areas file row order).
 # Block IDs are stored as (block_index + 1) so that 0 unambiguously marks
 # background voxels.
+#
+# Only blocks that are informative about the JOINT lesion/behaviour structure
+# are saved: per block, score = consistency-weighted mean behaviour_degree
+# of its member nodes (node_consistency acts as a confidence weight on how
+# reliably each node belongs to that block under the joint model; negative
+# kappa values are clipped to 0 so unreliable nodes don't invert the weighting).
+# Scores are z-scored across blocks within a level; only blocks with z > 0
+# (above-average joint informativeness) are written out.
 
 atlas_nii_path = os.path.join(args.data_path, 'ATLAS', f'{args.atlas}.nii.gz')
 atlas_img      = nib.load(atlas_nii_path)
@@ -651,8 +684,51 @@ atlas_data     = np.asarray(atlas_img.dataobj, dtype=np.int32)
 for level_idx in meaningful_levels:
     b_level  = modal_assignments[level_idx]
     n_blocks = int(b_level.max()) + 1
-    # One NIfTI + txt mapping per block
+
+    # ---- Score blocks by joint informativeness ---- #
+    block_scores = np.zeros(n_blocks)
     for blk in range(n_blocks):
+        nodes_in_block = np.where(b_level == blk)[0]
+        if len(nodes_in_block) == 0:
+            continue
+        w = np.clip(node_consistency[level_idx][nodes_in_block], 0, None)
+        vals = beh_degree[nodes_in_block]
+        block_scores[blk] = np.average(vals, weights=w) if w.sum() > 0 else vals.mean()
+
+    score_std    = block_scores.std()
+    block_zscore = (block_scores - block_scores.mean()) / score_std if score_std > 0 \
+                   else np.zeros_like(block_scores)
+    selected_blocks = np.where(block_zscore > 0)[0]
+
+    score_path = os.path.join(output_dir, f'SBM_block_scores_lvl{level_idx}_{args.score}.csv')
+    with open(score_path, 'w', newline='') as fh:
+        writer = csv.writer(fh)
+        writer.writerow(['block', 'n_nodes', 'score', 'zscore', 'selected'])
+        for blk in range(n_blocks):
+            writer.writerow([blk, int((b_level == blk).sum()),
+                             round(float(block_scores[blk]), 6),
+                             round(float(block_zscore[blk]), 6),
+                             blk in selected_blocks])
+    log_msg(f"| UPDATE | Level {level_idx}: {len(selected_blocks)}/{n_blocks} blocks "
+            f"selected (z > 0) for NIfTI output → {score_path}")
+
+    # ---- Combined NIfTI: z-score corrected value for ALL blocks (not just selected) ---- #
+    zscore_by_node = block_zscore[b_level]      # (n_nodes,) z-score of each node's own block
+    zscore_data    = np.zeros_like(atlas_data, dtype=np.float32)
+    valid_mask     = (atlas_data > 0) & (atlas_data <= len(zscore_by_node))
+    zscore_data[valid_mask] = zscore_by_node[atlas_data[valid_mask] - 1]
+    zscore_nii_path = os.path.join(output_dir,
+                                   f'{args.atlas}_lvl{level_idx}_blockzscores_{args.score}.nii.gz')
+    zscore_img = nib.Nifti1Image(zscore_data, atlas_img.affine, atlas_img.header)
+    nib.save(zscore_img, zscore_nii_path)
+    log_msg(f"| UPDATE | Combined block z-score NIfTI saved: level {level_idx} "
+            f"(all {n_blocks} blocks) → {zscore_nii_path}")
+
+    # One NIfTI + txt mapping per selected block, plus a single combined image
+    # where every voxel of a selected block carries that block's weighted
+    # behaviour score (consistency-weighted mean behaviour_degree) and 0 elsewhere.
+    score_data = np.zeros_like(atlas_data, dtype=np.float32)
+    for blk in selected_blocks:
         nodes_in_block = np.where(b_level == blk)[0]
         if len(nodes_in_block) == 0:
             continue
@@ -662,6 +738,7 @@ for level_idx in meaningful_levels:
             parcel_val = node_idx + 1       # 1-indexed parcel code in atlas NIfTI
             region_num = region_idx + 1     # 1-indexed label within this block
             block_data[atlas_data == parcel_val] = region_num
+            score_data[atlas_data == parcel_val] = block_scores[blk]
             mapping_lines.append(f"{region_num}\t{node_names[node_idx]}\t{locations[node_idx]}")
         nii_path = os.path.join(output_dir,
                                 f'{args.atlas}_lvl{level_idx}_block{blk}_{args.score}.nii.gz')
@@ -673,6 +750,13 @@ for level_idx in meaningful_levels:
             fh.write('\n'.join(mapping_lines) + '\n')
         log_msg(f"| UPDATE | Block NIfTI saved: level {level_idx} block {blk} "
                 f"({len(nodes_in_block)} regions) → {nii_path}")
+
+    score_nii_path = os.path.join(output_dir,
+                                  f'{args.atlas}_lvl{level_idx}_blockscores_{args.score}.nii.gz')
+    score_img = nib.Nifti1Image(score_data, atlas_img.affine, atlas_img.header)
+    nib.save(score_img, score_nii_path)
+    log_msg(f"| UPDATE | Combined block-score NIfTI saved: level {level_idx} "
+            f"({len(selected_blocks)} blocks) → {score_nii_path}")
     # Block connectivity matrix — CSV
     bmat     = block_connectivity[level_idx]
     csv_path = os.path.join(output_dir,

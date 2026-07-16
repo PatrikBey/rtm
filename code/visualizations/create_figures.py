@@ -35,7 +35,7 @@ from dipy.io.streamline import load_tractogram
 from dipy.io.stateful_tractogram import Space
 from dipy.tracking.streamline import Streamlines
 
-import numpy as np, os
+import numpy as np, os, csv
 import nibabel as nib
 import fury
 import matplotlib.pyplot as plt
@@ -53,8 +53,10 @@ import utils
 #################################
 
 path = '/mnt/h/RT/data/'
-result_dir = os.path.join(path,'RESULTS/split_threshold')
-
+result_dir = os.path.join(path,'RESULTS/')
+out_dir = os.path.join(path,'RESULTS','FIGURES')
+if not os.path.exists(out_dir):
+    os.makedirs(out_dir)
 
 TASKS = ['Foreperiod_Long_tau','GoNoGO_tau','SATO_Accuracy_tau']
 
@@ -116,7 +118,7 @@ for idx_s, i in enumerate(slices):
 
 plt.colorbar()
 plt.tight_layout()
-plt.savefig(os.path.join(path, 'LesionDistribution.svg'), dpi=150, bbox_inches='tight', facecolor='white')
+plt.savefig(os.path.join(out_dir, 'LesionDistribution.svg'), dpi=150, bbox_inches='tight', facecolor='white')
 plt.close()
 
 
@@ -133,9 +135,7 @@ surface_opacity = 0.05
 streamline_color = "#494949"
 streamline_opacity = 0.1
 streamline_linewidth = 0.75
-brain_color = "#B3B1B1"
 brain_opacity = 0.05
-roi_color = "#D3238A"
 roi_opacity = 0.3
 
 # ---- load local files ---- #
@@ -151,16 +151,16 @@ glass_meshes, brain_aspect = utils.load_glass_surface()
 fig, axes = utils.setup_views_figure()
 
 for ax, (view_name, elev, azim) in zip(axes, utils.VIEWS):
-    utils.plot_glass_surface(ax, glass_meshes, color=utils.hex_to_rgb(brain_color), opacity=brain_opacity)
+    utils.plot_glass_surface(ax, glass_meshes, color=utils.hex_to_rgb(back_colour), opacity=brain_opacity)
     utils.plot_tracts(ax, streamlines, colors=utils.hex_to_rgb(streamline_color),
                        opacity=streamline_opacity, linewidth=streamline_linewidth)
-    utils.plot_mask(ax, lesion_file, color=utils.hex_to_rgb(roi_color), opacity=roi_opacity)
+    utils.plot_mask(ax, lesion_file, color=utils.hex_to_rgb(roi_colour), opacity=roi_opacity)
     utils.finalize_view(ax, view_name, elev, azim, brain_aspect)
 
 plt.suptitle('Disconnectome example', fontsize=14)
 plt.tight_layout()
 
-out_path = os.path.join(path, 'example', 'disconnectome_example.svg')
+out_path = os.path.join(out_dir, 'disconnectome_example.svg')
 plt.savefig(out_path, dpi=150, bbox_inches='tight', facecolor='white')
 print(f'Saved → {out_path}')
 plt.close(fig)
@@ -172,62 +172,21 @@ plt.close(fig)
 #                                   #
 #####################################
 
+# ---- define local parameters ---- #
+cmap = utils.make_cmap([brain_colour, roi_colour])
 
-# ---- glass surface + streamlines + volumetric ROI ---- #
-glass_meshes, brain_aspect = utils.load_glass_surface()
-
-
-# ---- plot brain mapping layers ---- #
-coords = np.genfromtxt(os.path.join(path,'ATLAS',f'{atlas}_coords.txt'), delimiter=' ')
-
-layers = dict()
-
-fig, axes = plt.subplots(1, 4, figsize=(20, 5), constrained_layout=True)
-
-for ax, t in zip(axes[:3], TASKS):
-    utils.plot_glass_surface_2d(ax, glass_meshes, color=utils.hex_to_rgb(back_colour), opacity=0.05)
-    layers[f'{t}-beh'] = np.genfromtxt(os.path.join(result_dir,f'SBM_{atlas}_{t}_singleflip',f'SBM_layer_{t}_behaviour.txt'), delimiter=' ')
-    utils.plot_graph(ax, layers[f'{t}-beh'],coords[:,:2], colours = ['midnightblue','crimson','gold'])
-    ax.set_aspect('equal')
-    ax.axis('off')
-
-last_task = TASKS[-1]
-ax = axes[3]
-utils.plot_glass_surface_2d(ax, glass_meshes, color=utils.hex_to_rgb(back_colour), opacity=0.05)
-layers[f'{last_task}-les'] = np.genfromtxt(os.path.join(result_dir,f'SBM_{atlas}_{last_task}_singleflip',f'SBM_layer_{last_task}_cooccurrence.txt'), delimiter=' ')
-utils.plot_graph(ax, layers[f'{last_task}-les'],coords[:,:2], colours = ['midnightblue','crimson','gold'])
-ax.set_aspect('equal')
-ax.axis('off')
-
-plt.savefig(os.path.join(path, 'GraphLayers.svg'), dpi=200, bbox_inches='tight', facecolor='white')
-plt.close(fig)
-
-
-# --- plot layers in circular layout --- #
-coords = np.genfromtxt(os.path.join(path,'ATLAS',f'{atlas}_circle_coords_sorted.txt'), delimiter='\t')[1:,:]
-# coords = np.genfromtxt(os.path.join(path,'ATLAS',f'{atlas}_coords.txt'), delimiter=' ')
-
-layers = dict()
-
-fig, axes = plt.subplots(1, 4, figsize=(20, 5), constrained_layout=True)
-
-for ax, t in zip(axes[:3], TASKS):
-    layers[f'{t}-beh'] = np.genfromtxt(os.path.join(result_dir,f'SBM_{atlas}_{t}_singleflip',f'SBM_layer_{t}_behaviour.txt'), delimiter=' ')
-    utils.plot_graph(ax, layers[f'{t}-beh'],coords[:,:2], colours = ['midnightblue','crimson','gold'], node_size = 200, top_pct = .5)
-    ax.set_aspect('equal')
-    ax.axis('off')
-
-last_task = TASKS[-1]
-ax = axes[3]
-layers[f'{last_task}-les'] = np.genfromtxt(os.path.join(result_dir,f'SBM_{atlas}_{last_task}_singleflip',f'SBM_layer_{last_task}_cooccurrence.txt'), delimiter=' ')
-utils.plot_graph(ax, layers[f'{last_task}-les'],coords[:,:2], colours = ['midnightblue','crimson','gold'], node_size = 200, top_pct = .5)
-ax.set_aspect('equal')
-ax.axis('off')
-
-plt.savefig(os.path.join(path, 'GraphLayersCircle.svg'), dpi=200, bbox_inches='tight', facecolor='white')
-plt.close(fig)
-
-
+# ---- fit and plot a single SBM to one layer's adjacency matrix ---- #
+# no MCMC annealing, no multi-layer model: just graph_tool's own
+# minimize_nested_blockmodel_dl on a plain single-layer graph.
+# task = 'Foreperiod_Long_tau'
+for task in TASKS:
+    for layer in ['behaviour', 'cooccurrence']:
+        adj_path = os.path.join(result_dir, f'SBM_{atlas}_{task}_singleflip', f'SBM_layer_{task}_{layer}.txt')
+        adj = np.genfromtxt(adj_path, delimiter=' ')
+        grouped_raw = np.genfromtxt(os.path.join(path, 'ATLAS', f'{atlas}_areas_grouped.txt'), dtype=str, delimiter='\t')
+        node_groups = grouped_raw[1:, 2]
+        output_prefix = os.path.join(out_dir, f'SBM_state_{task}_{layer}')
+        state = utils.plot_sbm_state(adj, node_groups, output_prefix, cmap=cmap, arrow_colour='gold')
 
 
 
@@ -237,3 +196,88 @@ plt.close(fig)
 # 4. SBM BLOCKS                     #
 #                                   #
 #####################################
+
+# ---- define local parameters ---- #
+cmap = utils.make_cmap([brain_colour, roi_colour])
+surface_opacity = 0.05
+brain_opacity = 0.05
+roi_opacity = 0.3
+
+
+
+task = 'Foreperiod_Long_tau'
+for task in TASKS:
+    for layers in [0,1]:
+        block_img = nib.load(os.path.join(result_dir, f'SBM_{atlas}_{task}_singleflip', f'Schaefer2018-400_lvl{layers}_blockzscores_{task}.nii.gz'))
+
+        fig, axes = utils.plot_block_surface(block_img, cmap='plasma', surface_opacity=surface_opacity, brain_opacity=brain_opacity, roi_opacity=roi_opacity)
+
+        plt.suptitle(f'SBM block z-scores — {task} (layer {layers})', fontsize=14)
+        plt.tight_layout()
+
+        out_path = os.path.join(out_dir, f'SBM_blocks_surface_{task}_layer{layers}.svg')
+        plt.savefig(out_path, dpi=150, bbox_inches='tight', facecolor='white')
+        print(f'Saved → {out_path}')
+        plt.close(fig)
+
+
+# ---- per-block mean edge weight, normalized within each block (no z-score) ---- #
+for task in TASKS:
+    graph_path = os.path.join(result_dir, f'SBM_{atlas}_{task}_singleflip', f'SBM_final_graph_{task}.gt')
+    adj = utils.load_joint_adjacency(graph_path)
+
+    assignments_path = os.path.join(result_dir, f'SBM_{atlas}_{task}_singleflip', f'roi_block_assignments_{task}.csv')
+    with open(assignments_path, newline='') as fh:
+        rows = list(csv.DictReader(fh))
+
+    for level in [0, 1]:
+        level_col = f'level_{level}'
+        if level_col not in rows[0]:
+            continue
+        block_of_node = np.array([int(row[level_col]) for row in rows])
+        blocks, counts = np.unique(block_of_node, return_counts=True)
+        relevant_blocks = blocks[counts > 1]
+
+        for blk in relevant_blocks:
+            block_img = utils.block_edge_weight_image(adj, block_of_node, blk, atlas_img)
+
+            if not np.any(block_img.get_fdata() > 0):
+                print(f'Skipped (no intra-block edges) — {task} lvl{level} block{blk}')
+                continue
+
+            fig, axes = utils.plot_block_surface(block_img, cmap='plasma', surface_opacity=surface_opacity,
+                                                  brain_opacity=brain_opacity, roi_opacity=roi_opacity,
+                                                  positive_only=True)
+
+            plt.suptitle(f'Mean edge weight — {task} (level {level}, block {blk})', fontsize=14)
+            plt.tight_layout()
+
+            out_path = os.path.join(out_dir, f'SBM_block_edgeweights_{task}_lvl{level}_block{blk}.svg')
+            plt.savefig(out_path, dpi=150, bbox_inches='tight', facecolor='white')
+            print(f'Saved → {out_path}')
+            plt.close(fig)
+
+
+
+
+#####################################
+#                                   #
+# 5. SBM COMMUNITIES                #
+#                                   #
+#####################################
+
+# ---- define local parameters ---- #
+cmap = utils.make_cmap([brain_colour, roi_colour])
+
+# ---- fit and plot the block communities of the final joint graph ---- #
+# same as section 3, except one adjacency per task (behaviour +
+# cooccurrence collapsed into the final MCMC-fitted multilayer graph)
+# instead of two separate per-layer maps.
+for task in TASKS:
+    graph_path = os.path.join(result_dir, f'SBM_{atlas}_{task}_singleflip', f'SBM_final_graph_{task}.gt')
+    adj = utils.load_joint_adjacency(graph_path)
+    grouped_raw = np.genfromtxt(os.path.join(path, 'ATLAS', f'{atlas}_areas_grouped.txt'), dtype=str, delimiter='\t')
+    node_groups = grouped_raw[1:, 2]
+    output_prefix = os.path.join(out_dir, f'SBM_final_state_{task}_joint')
+    state = utils.plot_sbm_state(adj, node_groups, output_prefix, cmap=cmap, arrow_colour='gold')
+

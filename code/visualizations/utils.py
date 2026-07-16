@@ -32,12 +32,17 @@ import os
 import nibabel as nib
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+from matplotlib.colors import Normalize
 from matplotlib.collections import PolyCollection
+from matplotlib.patches import Patch
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from skimage.measure import marching_cubes
 
+import graph_tool.all as gt
+
 from nilearn.datasets import fetch_surf_fsaverage
-from nilearn.surface import load_surf_mesh
+from nilearn.surface import load_surf_mesh, vol_to_surf
 
 
 def hex_to_rgb(hex_color):
@@ -148,6 +153,102 @@ def plot_glass_surface_2d(ax, meshes, color=(0.8, 0.8, 0.8), opacity=0.05, axes=
                                alpha=opacity, zorder=0)
         ax.add_collection(poly)
     ax.autoscale_view()
+
+
+#################################
+#   scalar volume -> surface    #
+#################################
+
+def project_to_surface(img, mesh_name='fsaverage5', surface='pial', interpolation='linear'):
+    """Project a scalar nifti volume onto both hemispheres of a surface mesh.
+
+    Returns {hemi: (vertices, faces, projected_values)}.
+    """
+    fsaverage = fetch_surf_fsaverage(mesh=mesh_name)
+    projected = {}
+    for hemi in ('left', 'right'):
+        mesh_path = fsaverage[f'{surface}_{hemi}']
+        mesh = load_surf_mesh(mesh_path)
+        values = vol_to_surf(img, mesh_path, interpolation=interpolation)
+        projected[hemi] = (mesh.coordinates, mesh.faces, values)
+    return projected
+
+
+def plot_surface_scalar(ax, vertices, faces, values, cmap='viridis', vmin=None, vmax=None,
+                         background_color=(0.8, 0.8, 0.8), background_opacity=0.05, opacity=0.9,
+                         positive_only=False):
+    """Colour surface faces by the mean of their vertices' scalar `values`.
+
+    Faces with no data (NaN — e.g. medial wall or non-cortical parcels)
+    are drawn as translucent background cortex; all other faces are
+    colour-mapped regardless of sign, unless `positive_only` is set, in
+    which case zero/negative faces are treated as background too.
+    `vmin`/`vmax` default to the data's own (colour-mapped) range if not
+    given.
+    """
+    values = np.asarray(values)
+    face_vals = np.nanmean(values[faces], axis=1)
+    valid = ~np.isnan(face_vals)
+    if positive_only:
+        valid &= face_vals > 0
+
+    cmap_obj = cm.get_cmap(cmap)
+    if vmin is None:
+        vmin = np.nanmin(face_vals[valid]) if valid.any() else 0
+    if vmax is None:
+        vmax = np.nanmax(face_vals[valid]) if valid.any() else 1
+    norm = Normalize(vmin=vmin, vmax=vmax)
+
+    face_rgba = np.empty((len(faces), 4))
+    if valid.any():
+        face_rgba[valid] = [(*cmap_obj(norm(v))[:3], opacity) for v in face_vals[valid]]
+    face_rgba[~valid] = (*background_color, background_opacity)
+
+    poly = Poly3DCollection(vertices[faces], zsort='average')
+    poly.set_facecolors(face_rgba)
+    poly.set_edgecolors('none')
+    ax.add_collection3d(poly)
+
+    return cmap_obj, norm
+
+
+def plot_block_surface(img, cmap='viridis', surface_opacity=0.05, brain_opacity=0.05, roi_opacity=0.3,
+                        positive_only=False):
+    """Project a scalar volume (e.g. SBM block z-scores) onto the cortical
+    surface and render it across the shared axial/coronal/sagittal views.
+
+    Takes the volume and a colormap — projection, view setup and styling
+    are all handled internally so callers don't need to know about
+    surface-projection details. `brain_opacity` sets the alpha of the
+    no-data background cortex and `roi_opacity` the alpha of the
+    colour-mapped (data) faces, mirroring the disconnectome example's
+    local parameters. `surface_opacity` is accepted for parity with that
+    example but currently unused. If `positive_only` is set, only values
+    greater than zero are colour-mapped (rest drawn as background).
+
+    Returns (fig, axes).
+    """
+    background_color = (0.8, 0.8, 0.8)
+
+    hemi_surface = project_to_surface(img)
+    all_verts = np.vstack([v for v, _, _ in hemi_surface.values()])
+    brain_aspect = [all_verts[:, i].max() - all_verts[:, i].min() for i in range(3)]
+
+    all_vals = np.concatenate([vals for _, _, vals in hemi_surface.values()])
+    valid_vals = all_vals[~np.isnan(all_vals)]
+    if positive_only:
+        valid_vals = valid_vals[valid_vals > 0]
+    vmin, vmax = (valid_vals.min(), valid_vals.max()) if valid_vals.size else (0, 1)
+
+    fig, axes = setup_views_figure()
+    for ax, (view_name, elev, azim) in zip(axes, VIEWS):
+        for vertices, faces, values in hemi_surface.values():
+            plot_surface_scalar(ax, vertices, faces, values, cmap=cmap, vmin=vmin, vmax=vmax,
+                                 background_color=background_color, background_opacity=brain_opacity,
+                                 opacity=roi_opacity, positive_only=positive_only)
+        finalize_view(ax, view_name, elev, azim, brain_aspect)
+
+    return fig, axes
 
 
 #################################
@@ -274,3 +375,183 @@ def plot_graph(ax, adj, coords, colours=('paleturquoise', '#D3238A'), node_size=
     # Draw kept nodes only, sized and coloured by degree
     ax.scatter(coords[keep, 0], coords[keep, 1],
                color=node_color_vals, s=node_sizes, zorder=3)
+
+
+#################################
+#      SBM state + legend       #
+#################################
+
+def load_joint_adjacency(graph_path):
+    """Load a saved multilayer graph_tool graph and collapse its behaviour
+    and cooccurrence edge weights into a single joint adjacency matrix —
+    the same combined structure the final MCMC-fitted multilayer SBM was
+    run on, as opposed to each layer's own separate adjacency.
+    """
+    g = gt.load_graph(graph_path)
+    n = g.num_vertices()
+    adj = np.zeros((n, n))
+    for e in g.edges():
+        i, j = int(e.source()), int(e.target())
+        adj[i, j] = adj[j, i] = g.ep.behaviour_weight[e] + g.ep.cooccurrence_weight[e]
+    return adj
+
+
+def block_edge_weight_image(adj, block_of_node, block_id, atlas_img):
+    """Build a NIfTI where each ROI belonging to `block_id` carries its own
+    mean edge weight to other members of that block, normalized by the
+    block's own maximum (no z-scoring), and 0 elsewhere.
+
+    `block_of_node` is an array of block IDs in the same row order as
+    `adj` (block_of_node[i] is the block of node i, atlas parcel i+1).
+    """
+    atlas_data = np.asarray(atlas_img.dataobj)
+    members = np.where(block_of_node == block_id)[0]
+
+    weights = np.zeros(len(members))
+    for idx, node in enumerate(members):
+        peers = members[members != node]
+        edge_vals = adj[node, peers]
+        nonzero = edge_vals[edge_vals > 0]
+        weights[idx] = nonzero.mean() if nonzero.size else 0.0
+
+    max_w = weights.max()
+    if max_w > 0:
+        weights = weights / max_w
+
+    data = np.zeros(atlas_data.shape, dtype=np.float32)
+    for node, w in zip(members, weights):
+        data[atlas_data == node + 1] = w
+
+    return nib.Nifti1Image(data, atlas_img.affine, atlas_img.header)
+
+
+def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour='black', edge_alpha=0.5):
+    """
+    Fit a single (non-layered, non-annealed) nested SBM to `adj`, then draw
+    that same fitted state twice with graph_tool's state.draw() — once per
+    colour scheme — so node ordering and edges (which state.draw() lays out
+    according to the fitted block structure) are identical between the two
+    and only the colouring differs:
+
+    1. '{output_prefix}_blocks.svg' — nodes coloured by their SBM block
+       (tab20); one representative node per block labelled with its block
+       index (to avoid clutter); a legend ('{output_prefix}_blocks_legend.svg')
+       maps each block colour to the majority `node_groups` entry among that
+       block's members.
+    2. '{output_prefix}_weights.svg' — edges coloured by their own weight and
+       nodes by degree, both via the `cmap` colormap.
+
+    `node_groups` must be an array/list of group labels in the same row
+    order as `adj` (node_groups[i] is the group of node i).
+
+    `arrow_colour` (default 'black') sets the colour of the hierarchy overlay
+    that state.draw() adds on top of the base graph — the block marker glyphs
+    and the connectors ("arrows"/"rectangles") from each node to its block.
+
+    `edge_alpha` (default 0.5) sets the transparency of the base graph's
+    edges in both plots.
+
+    Returns the fitted graph_tool NestedBlockState.
+    """
+    node_groups = np.asarray(node_groups)
+
+    g = gt.Graph(directed=False)
+    g.add_vertex(adj.shape[0])
+    weight = g.new_edge_property('double')
+    src, dst = np.where(np.triu(adj, k=1) > 0)
+    for i, j in zip(src, dst):
+        e = g.add_edge(i, j)
+        weight[e] = adj[i, j]
+
+    state = gt.minimize_nested_blockmodel_dl(g)
+
+    # ---- 1. block-coloured version + legend ---- #
+    b = state.levels[0].get_blocks()
+    block_of_node = np.array([b[v] for v in g.vertices()])
+    unique_blocks = sorted(set(block_of_node.tolist()))
+
+    tab_cmap    = cm.get_cmap('tab20')
+    block_color = {blk: tab_cmap(i % 20) for i, blk in enumerate(unique_blocks)}
+
+    block_fill_color = g.new_vertex_property('vector<double>')
+    for v in g.vertices():
+        block_fill_color[v] = block_color[b[v]]
+
+    block_majority_group = {}
+    for blk in unique_blocks:
+        groups_in_block = node_groups[block_of_node == blk]
+        labels, counts   = np.unique(groups_in_block, return_counts=True)
+        block_majority_group[blk] = labels[np.argmax(counts)]
+
+    # label only one representative node per block with its block index,
+    # to avoid cluttering the plot
+    representative_node = {}
+    for v in g.vertices():
+        representative_node.setdefault(b[v], v)
+
+    vertex_text = g.new_vertex_property('string')
+    for blk, v in representative_node.items():
+        vertex_text[v] = str(blk)
+
+    # edges blended from their endpoints' block colours, with edge_alpha
+    # transparency (edge_gradient=[] so this explicit colour is used as-is,
+    # rather than graph_tool's own vertex-to-vertex gradient)
+    block_edge_color = g.new_edge_property('vector<double>')
+    for e in g.edges():
+        src_c, tgt_c = block_fill_color[e.source()], block_fill_color[e.target()]
+        avg_rgb = [(src_c[c] + tgt_c[c]) / 2 for c in range(3)]
+        block_edge_color[e] = (*avg_rgb, edge_alpha)
+
+    state.draw(
+        vertex_fill_color=block_fill_color,
+        vertex_color=block_fill_color,
+        vertex_text=vertex_text,
+        vertex_font_size=10,
+        edge_color=block_edge_color,
+        edge_gradient=[],
+        hedge_color=arrow_colour,
+        hvertex_fill_color=arrow_colour,
+        hvertex_color=arrow_colour,
+        output=f'{output_prefix}_blocks.svg',
+        output_size=(800, 800),
+    )
+
+    legend_elements = [
+        Patch(facecolor=block_color[blk], edgecolor='black', label=f'Block {blk}: {block_majority_group[blk]}')
+        for blk in unique_blocks
+    ]
+    fig, ax = plt.subplots(figsize=(4, max(2, 0.3 * len(unique_blocks))))
+    ax.legend(handles=legend_elements, loc='center', frameon=True, fontsize=9)
+    ax.axis('off')
+    plt.tight_layout()
+    plt.savefig(f'{output_prefix}_blocks_legend.svg', dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+
+    # ---- 2. weight/degree-coloured version, same fitted state ---- #
+    cmap_obj = cm.get_cmap(cmap)
+
+    weights   = np.array([weight[e] for e in g.edges()])
+    edge_norm = Normalize(vmin=weights.min(), vmax=weights.max()) if weights.size else Normalize(0, 1)
+    edge_color = g.new_edge_property('vector<double>')
+    for e in g.edges():
+        r, gg, bb, _ = cmap_obj(edge_norm(weight[e]))
+        edge_color[e] = (r, gg, bb, edge_alpha)
+
+    degree     = (adj > 0).sum(axis=1)
+    deg_norm   = Normalize(vmin=degree.min(), vmax=degree.max())
+    degree_fill_color = g.new_vertex_property('vector<double>')
+    for v in g.vertices():
+        degree_fill_color[v] = cmap_obj(deg_norm(degree[int(v)]))
+
+    state.draw(
+        vertex_fill_color=degree_fill_color,
+        edge_color=edge_color,
+        edge_gradient=[],
+        hedge_color=arrow_colour,
+        hvertex_fill_color=arrow_colour,
+        hvertex_color=arrow_colour,
+        output=f'{output_prefix}_weights.svg',
+        output_size=(800, 800),
+    )
+
+    return state
