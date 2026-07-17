@@ -396,6 +396,40 @@ def load_joint_adjacency(graph_path):
     return adj
 
 
+def nested_bs_from_node_levels(level_arrays):
+    """Convert a list of per-node block-assignment arrays — one per
+    hierarchy level, each length n_nodes (e.g. the level_0, level_1, ...
+    columns of roi_block_assignments_{task}.csv) — into the block-to-block
+    `bs` format graph_tool's NestedBlockState expects: bs[0] is the
+    per-node level-0 assignment; each subsequent bs[k] maps every
+    level-(k-1) block id to its level-k id, taken as the majority level-k
+    value among that block's members (levels are assumed nested/consistent,
+    though modal per-level partitions computed via posterior consensus can
+    disagree slightly — majority vote resolves that).
+
+    A trivial single root group is appended on top if the topmost given
+    level isn't already a single block, since NestedBlockState requires
+    the hierarchy to terminate in one group.
+    """
+    bs = [np.asarray(level_arrays[0], dtype=int)]
+    for lower, upper in zip(level_arrays[:-1], level_arrays[1:]):
+        lower = np.asarray(lower, dtype=int)
+        upper = np.asarray(upper, dtype=int)
+        n_blocks = lower.max() + 1
+        mapping = np.zeros(n_blocks, dtype=int)
+        for blk in range(n_blocks):
+            members = np.where(lower == blk)[0]
+            if len(members):
+                vals, counts = np.unique(upper[members], return_counts=True)
+                mapping[blk] = vals[np.argmax(counts)]
+        bs.append(mapping)
+
+    if bs[-1].max() > 0:
+        bs.append(np.zeros(bs[-1].max() + 1, dtype=int))
+
+    return bs
+
+
 def block_edge_weight_image(adj, block_of_node, block_id, atlas_img):
     """Build a NIfTI where each ROI belonging to `block_id` carries its own
     mean edge weight to other members of that block, normalized by the
@@ -425,7 +459,8 @@ def block_edge_weight_image(adj, block_of_node, block_id, atlas_img):
     return nib.Nifti1Image(data, atlas_img.affine, atlas_img.header)
 
 
-def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour='black', edge_alpha=0.5):
+def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour='black', edge_alpha=0.5,
+                    min_edge_alpha=0.05, block_of_node=None):
     """
     Fit a single (non-layered, non-annealed) nested SBM to `adj`, then draw
     that same fitted state twice with graph_tool's state.draw() — once per
@@ -444,14 +479,28 @@ def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour=
     `node_groups` must be an array/list of group labels in the same row
     order as `adj` (node_groups[i] is the group of node i).
 
+    If `block_of_node` is given, that partition is used as-is instead of
+    independently re-fitting a new nested SBM — so the block IDs
+    drawn/labelled are the caller's own original IDs rather than a fresh
+    0..n_blocks-1 relabelling from an unrelated fit. It may be either a
+    single array of per-node level-0 block IDs (in the same row order as
+    `adj`; wrapped in a trivial single-group root level), or a list of
+    such arrays, one per hierarchy level (level_0, level_1, ... — see
+    `nested_bs_from_node_levels`), to also show the higher-level hierarchy
+    overlay.
+
     `arrow_colour` (default 'black') sets the colour of the hierarchy overlay
     that state.draw() adds on top of the base graph — the block marker glyphs
     and the connectors ("arrows"/"rectangles") from each node to its block.
 
-    `edge_alpha` (default 0.5) sets the transparency of the base graph's
-    edges in both plots.
+    Edge transparency scales with edge weight rather than being constant:
+    `edge_alpha` (default 0.5) is the alpha of the highest-weight edge and
+    `min_edge_alpha` (default 0.05) the alpha of the lowest-weight edge, so
+    higher-weight edges are less transparent than lower-weight ones, in
+    both plots.
 
-    Returns the fitted graph_tool NestedBlockState.
+    Returns the graph_tool NestedBlockState (fitted, or wrapping the given
+    `block_of_node` partition).
     """
     node_groups = np.asarray(node_groups)
 
@@ -463,7 +512,21 @@ def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour=
         e = g.add_edge(i, j)
         weight[e] = adj[i, j]
 
-    state = gt.minimize_nested_blockmodel_dl(g)
+    weights   = np.array([weight[e] for e in g.edges()])
+    edge_norm = Normalize(vmin=weights.min(), vmax=weights.max()) if weights.size else Normalize(0, 1)
+    edge_weight_alpha = g.new_edge_property('double')
+    for e in g.edges():
+        edge_weight_alpha[e] = min_edge_alpha + (edge_alpha - min_edge_alpha) * edge_norm(weight[e])
+
+    if block_of_node is not None:
+        if isinstance(block_of_node, (list, tuple)):
+            bs = nested_bs_from_node_levels(block_of_node)
+        else:
+            b0 = np.asarray(block_of_node, dtype=int)
+            bs = [b0, np.zeros(b0.max() + 1, dtype=int)]
+        state = gt.NestedBlockState(g, bs=bs)
+    else:
+        state = gt.minimize_nested_blockmodel_dl(g)
 
     # ---- 1. block-coloured version + legend ---- #
     b = state.levels[0].get_blocks()
@@ -493,14 +556,14 @@ def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour=
     for blk, v in representative_node.items():
         vertex_text[v] = str(blk)
 
-    # edges blended from their endpoints' block colours, with edge_alpha
+    # edges blended from their endpoints' block colours, with weight-scaled
     # transparency (edge_gradient=[] so this explicit colour is used as-is,
     # rather than graph_tool's own vertex-to-vertex gradient)
     block_edge_color = g.new_edge_property('vector<double>')
     for e in g.edges():
         src_c, tgt_c = block_fill_color[e.source()], block_fill_color[e.target()]
         avg_rgb = [(src_c[c] + tgt_c[c]) / 2 for c in range(3)]
-        block_edge_color[e] = (*avg_rgb, edge_alpha)
+        block_edge_color[e] = (*avg_rgb, edge_weight_alpha[e])
 
     state.draw(
         vertex_fill_color=block_fill_color,
@@ -530,12 +593,10 @@ def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour=
     # ---- 2. weight/degree-coloured version, same fitted state ---- #
     cmap_obj = cm.get_cmap(cmap)
 
-    weights   = np.array([weight[e] for e in g.edges()])
-    edge_norm = Normalize(vmin=weights.min(), vmax=weights.max()) if weights.size else Normalize(0, 1)
     edge_color = g.new_edge_property('vector<double>')
     for e in g.edges():
         r, gg, bb, _ = cmap_obj(edge_norm(weight[e]))
-        edge_color[e] = (r, gg, bb, edge_alpha)
+        edge_color[e] = (r, gg, bb, edge_weight_alpha[e])
 
     degree     = (adj > 0).sum(axis=1)
     deg_norm   = Normalize(vmin=degree.min(), vmax=degree.max())

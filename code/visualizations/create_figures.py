@@ -108,7 +108,7 @@ for idx_s, i in enumerate(slices):
     plt.imshow(np.where(tmp==0,np.nan,tmp), cmap='gray', origin='lower', alpha = 0.9, interpolation='quadric')
     tmp = lesion_img[:,:,i].T
     # plt.contourf(np.where(tmp==0,np.nan,tmp), levels = levels_per_slice[idx_s], cmap = cmap, origin='lower', alpha = .75, antialiased=False)
-    plt.imshow(np.where(tmp==0,np.nan,tmp), cmap = cmap, interpolation='quadric', origin='lower', alpha = .66)
+    plt.imshow(np.where(tmp==0,np.nan,tmp), cmap = 'plasma', interpolation='quadric', origin='lower', alpha = .66)
     plt.clim((0, lesion_img.max()))
     plt.xticks([])
     plt.yticks([])
@@ -286,6 +286,14 @@ for task in TASKS:
     adj = utils.load_joint_adjacency(graph_path)
     grouped_raw = np.genfromtxt(os.path.join(path, 'ATLAS', f'{atlas}_areas_grouped.txt'), dtype=str, delimiter='\t')
     node_groups = grouped_raw[1:, 2]
+
+    assignments_path = os.path.join(result_dir, f'SBM_{atlas}_{task}_singleflip', f'roi_block_assignments_{task}.csv')
+    with open(assignments_path, newline='') as fh:
+        rows = list(csv.DictReader(fh))
+    level_cols = sorted((c for c in rows[0] if c.startswith('level_')), key=lambda c: int(c.split('_')[1]))
+    block_of_node = [np.array([int(row[c]) for row in rows]) for c in level_cols]
+
     output_prefix = os.path.join(out_dir, f'SBM_final_state_{task}_joint')
-    state = utils.plot_sbm_state(adj, node_groups, output_prefix, cmap=cmap, arrow_colour='gold')
+    state = utils.plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour='gold',
+                                  block_of_node=block_of_node)
 
