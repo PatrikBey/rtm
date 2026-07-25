@@ -33,7 +33,7 @@ import nibabel as nib
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
-from matplotlib.colors import Normalize
+from matplotlib.colors import Normalize, LogNorm
 from matplotlib.collections import PolyCollection
 from matplotlib.patches import Patch
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -396,6 +396,23 @@ def load_joint_adjacency(graph_path):
     return adj
 
 
+def load_pnb_adjacency(graph_path):
+    """Load a saved single-layer PseudoNormalBlockState reconstruction
+    graph (run_recon_pnb.py / run_recon_pnb_strength.py output) into a
+    plain adjacency matrix, using the fitted coupling-strength edge
+    property ('x') as edge weight -- the single-layer counterpart of
+    load_joint_adjacency, which collapses a run.py multilayer graph's two
+    separate weight properties instead.
+    """
+    g = gt.load_graph(graph_path)
+    n = g.num_vertices()
+    adj = np.zeros((n, n))
+    for e in g.edges():
+        i, j = int(e.source()), int(e.target())
+        adj[i, j] = adj[j, i] = g.ep.x[e]
+    return adj
+
+
 def nested_bs_from_node_levels(level_arrays):
     """Convert a list of per-node block-assignment arrays — one per
     hierarchy level, each length n_nodes (e.g. the level_0, level_1, ...
@@ -459,8 +476,32 @@ def block_edge_weight_image(adj, block_of_node, block_id, atlas_img):
     return nib.Nifti1Image(data, atlas_img.affine, atlas_img.header)
 
 
+def block_membership_image(block_of_node, block_id, atlas_img):
+    """Build a NIfTI marking every ROI belonging to `block_id` with a
+    constant value of 1 (0 elsewhere) -- pure membership, no edge weight
+    or other value attached. Meant to be rendered with plot_block_surface
+    (positive_only=True): since every member voxel shares the same value,
+    the colormap's normalization collapses to a single flat colour, so
+    membership is shown regardless of whether that block happens to have
+    any intra-block edges (which block_edge_weight_image would render as
+    empty, even for a real, z-score-selected block).
+
+    `block_of_node` is an array of block IDs in the same row order as the
+    atlas parcellation (block_of_node[i] is the block of node i, atlas
+    parcel i+1).
+    """
+    atlas_data = np.asarray(atlas_img.dataobj)
+    members = np.where(block_of_node == block_id)[0]
+
+    data = np.zeros(atlas_data.shape, dtype=np.float32)
+    for node in members:
+        data[atlas_data == node + 1] = 1.0
+
+    return nib.Nifti1Image(data, atlas_img.affine, atlas_img.header)
+
+
 def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour='black', edge_alpha=0.5,
-                    min_edge_alpha=0.05, block_of_node=None):
+                    min_edge_alpha=0.05, block_of_node=None, relevance=None):
     """
     Fit a single (non-layered, non-annealed) nested SBM to `adj`, then draw
     that same fitted state twice with graph_tool's state.draw() — once per
@@ -473,8 +514,19 @@ def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour=
        index (to avoid clutter); a legend ('{output_prefix}_blocks_legend.svg')
        maps each block colour to the majority `node_groups` entry among that
        block's members.
-    2. '{output_prefix}_weights.svg' — edges coloured by their own weight and
-       nodes by degree, both via the `cmap` colormap.
+    2. '{output_prefix}_weights.svg' — nodes coloured AND sized by degree.
+       Each edge is drawn as a genuine two-colour GRADIENT running from its
+       source endpoint's own colour to its target endpoint's own colour
+       (not a single flat average), where each endpoint's colour comes from
+       `relevance` (a per-node behavioural-relevance score, e.g.
+       region_behaviour_relevance's output) if given -- so this view
+       reflects the behavioural variable rather than the raw fitted edge
+       weight (which is a ROI-ROI coupling strength with no direct
+       relationship to behaviour -- see project discussion). Falls back to
+       a flat colour by the edge's own |weight| (the original behaviour)
+       if `relevance` is None. Edge transparency is always driven by
+       |weight| regardless (see edge_alpha/min_edge_alpha below) -- only
+       the colour channel changes.
 
     `node_groups` must be an array/list of group labels in the same row
     order as `adj` (node_groups[i] is the group of node i).
@@ -504,19 +556,34 @@ def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour=
     """
     node_groups = np.asarray(node_groups)
 
+    # edge presence is sign-agnostic (adj != 0, not adj > 0): run.py's
+    # tractography/cooccurrence weights are always >= 0 so this is a no-op
+    # there, but run_recon_pnb.py's fitted coupling strengths ('x') are
+    # frequently negative (anti-correlated pairs) -- filtering to > 0 was
+    # silently discarding the large majority of real edges (observed
+    # ~90-99% negative in practice), producing near-empty graphs. Alpha/
+    # colour scaling below uses |weight| throughout for the same reason:
+    # coupling MAGNITUDE, not sign, is what should drive visual prominence.
     g = gt.Graph(directed=False)
     g.add_vertex(adj.shape[0])
     weight = g.new_edge_property('double')
-    src, dst = np.where(np.triu(adj, k=1) > 0)
+    src, dst = np.where(np.triu(adj, k=1) != 0)
     for i, j in zip(src, dst):
         e = g.add_edge(i, j)
         weight[e] = adj[i, j]
 
-    weights   = np.array([weight[e] for e in g.edges()])
-    edge_norm = Normalize(vmin=weights.min(), vmax=weights.max()) if weights.size else Normalize(0, 1)
+    # log-scaled: coupling magnitudes here commonly span multiple orders of
+    # magnitude (e.g. observed range [1.1, 9978] for one beh_weighted fit)
+    # -- a linear Normalize compresses the bulk of edges toward one end of
+    # the colormap, with only a few extreme outliers spanning the rest
+    # (reported as "most edges bright yellow, only a few purple" in
+    # plasma). LogNorm spreads colour differences evenly across the full
+    # magnitude range instead.
+    weights   = np.abs(np.array([weight[e] for e in g.edges()]))
+    edge_norm = LogNorm(vmin=weights[weights > 0].min(), vmax=weights.max()) if weights.size else Normalize(0, 1)
     edge_weight_alpha = g.new_edge_property('double')
     for e in g.edges():
-        edge_weight_alpha[e] = min_edge_alpha + (edge_alpha - min_edge_alpha) * edge_norm(weight[e])
+        edge_weight_alpha[e] = min_edge_alpha + (edge_alpha - min_edge_alpha) * edge_norm(abs(weight[e]))
 
     if block_of_node is not None:
         if isinstance(block_of_node, (list, tuple)):
@@ -527,6 +594,19 @@ def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour=
         state = gt.NestedBlockState(g, bs=bs)
     else:
         state = gt.minimize_nested_blockmodel_dl(g)
+
+    # ---- work around a graph_tool crash, do not change which draw ---- #
+    # function is called: draw_hierarchy() (invoked by state.draw() below)
+    # calls label_self_loops(level_graph).fa.max() for every hierarchy
+    # level -- on a totally edgeless level graph that .fa array is
+    # zero-size, and .max() raises ValueError. A coarse/sparse partition
+    # (e.g. a level with disconnected super-blocks) can genuinely produce
+    # such a level. Adding one self-loop is purely a rendering-time fix
+    # (it doesn't touch the fitted partition state.draw() reads from).
+    for level in state.levels:
+        if level.g.num_edges() == 0:
+            v0 = level.g.vertex(0)
+            level.g.add_edge(v0, v0)
 
     # ---- 1. block-coloured version + legend ---- #
     b = state.levels[0].get_blocks()
@@ -590,24 +670,49 @@ def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour=
     plt.savefig(f'{output_prefix}_blocks_legend.svg', dpi=150, bbox_inches='tight', facecolor='white')
     plt.close(fig)
 
-    # ---- 2. weight/degree-coloured version, same fitted state ---- #
+    # ---- 2. degree-coloured/sized nodes, relevance- (or weight-) coloured edges ---- #
     cmap_obj = cm.get_cmap(cmap)
 
-    edge_color = g.new_edge_property('vector<double>')
-    for e in g.edges():
-        r, gg, bb, _ = cmap_obj(edge_norm(weight[e]))
-        edge_color[e] = (r, gg, bb, edge_weight_alpha[e])
-
-    degree     = (adj > 0).sum(axis=1)
-    deg_norm   = Normalize(vmin=degree.min(), vmax=degree.max())
+    degree      = (adj != 0).sum(axis=1)
+    deg_norm    = Normalize(vmin=degree.min(), vmax=degree.max())
     degree_fill_color = g.new_vertex_property('vector<double>')
+    degree_size       = g.new_vertex_property('double')
+    min_size, max_size = 5.0, 20.0
     for v in g.vertices():
-        degree_fill_color[v] = cmap_obj(deg_norm(degree[int(v)]))
+        d = deg_norm(degree[int(v)])
+        degree_fill_color[v] = cmap_obj(d)
+        degree_size[v]       = min_size + (max_size - min_size) * d
+
+    if relevance is not None:
+        # true two-colour gradient along each edge, from the source
+        # endpoint's own relevance colour to the target's -- NOT the
+        # average of the two (a flat colour). graph_tool's edge_gradient
+        # property takes the literal format [stop0, r0,g0,b0,a0, stop1,
+        # r1,g1,b1,a1] per edge; passing it explicitly (rather than
+        # leaving it at the default []) fully replaces edge_color, and is
+        # independent of vertex_fill_color (which stays degree-based here).
+        relevance   = np.asarray(relevance, dtype=np.float64)
+        rel_norm    = Normalize(vmin=relevance.min(), vmax=relevance.max())
+        vertex_rel_color = {v: cmap_obj(rel_norm(relevance[int(v)])) for v in g.vertices()}
+
+        edge_gradient_prop = g.new_edge_property('vector<double>')
+        for e in g.edges():
+            r0, g0, b0, _ = vertex_rel_color[e.source()]
+            r1, g1, b1, _ = vertex_rel_color[e.target()]
+            a = edge_weight_alpha[e]
+            edge_gradient_prop[e] = [0, r0, g0, b0, a, 1, r1, g1, b1, a]
+        edge_draw_kwargs = dict(edge_gradient=edge_gradient_prop)
+    else:
+        edge_color = g.new_edge_property('vector<double>')
+        for e in g.edges():
+            r, gg, bb, _ = cmap_obj(edge_norm(abs(weight[e])))
+            edge_color[e] = (r, gg, bb, edge_weight_alpha[e])
+        edge_draw_kwargs = dict(edge_color=edge_color, edge_gradient=[])
 
     state.draw(
         vertex_fill_color=degree_fill_color,
-        edge_color=edge_color,
-        edge_gradient=[],
+        vertex_size=degree_size,
+        **edge_draw_kwargs,
         hedge_color=arrow_colour,
         hvertex_fill_color=arrow_colour,
         hvertex_color=arrow_colour,

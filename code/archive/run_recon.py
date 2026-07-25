@@ -417,6 +417,21 @@ def brain_only_graph(g, behaviour_node):
     return gt.Graph(gv, prune=True)
 
 
+def behaviour_only_graph(g, behaviour_node):
+    '''
+    materialize a standalone copy of a graph keeping only edges incident to
+    the behaviour node (i.e. the full with-behaviour graph minus
+    brain_only_graph, edge-wise): isolates which regions behaviour actually
+    connects to, dropping every pure brain-to-brain edge. All vertices
+    (including brain regions with no behaviour edge) are kept.
+    '''
+    keep = g.new_edge_property('bool', val=False)
+    for e in g.vertex(behaviour_node).all_edges():
+        keep[e] = True
+    gv = gt.GraphView(g, efilt=keep)
+    return gt.Graph(gv, prune=True)
+
+
 def get_blocks(state, level=0):
     '''
     get the per-node block assignment array at a given hierarchy level from
@@ -579,11 +594,9 @@ def draw_state(state, relevance, output, node_names=None, output_size=(1200, 120
     bstate.draw(**draw_kwargs)
 
 
-def load_node_matrix(data_file, threshold=0.5, threshold_mode='raw'):
+def binarize(vals, threshold=0.5, threshold_mode='raw'):
     '''
-    load the subject x node matrix and return a binarized data matrix, the
-    subject list, and the node/ROI names (from the file's header row).
-    Two thresholding modes:
+    binarize a subject x node value matrix. Two thresholding modes:
       'raw'      - a single global cutoff (value > threshold), appropriate
                    for lesion load percentages: already on a comparable
                    0-100 scale across subjects and ROIs, so no per-subject
@@ -593,13 +606,13 @@ def load_node_matrix(data_file, threshold=0.5, threshold_mode='raw'):
                    threshold)). Appropriate for degree/node-strength data,
                    whose absolute scale is not comparable across subjects
                    (depends on each subject's own tractogram reconstruction).
+                   Note: scale-invariant per row, so uniformly rescaling a
+                   subject's whole row (e.g. by a behaviour weight) before
+                   calling this in 'quantile' mode has no effect on the
+                   result -- only 'raw' mode is sensitive to pre-scaling.
     '''
-    data       = np.genfromtxt(data_file, delimiter='\t', dtype=str)
-    node_names = data[0, 1:].tolist()
-    vals       = data[1:, 1:].astype(float)
-
     if threshold_mode == 'raw':
-        X = (vals > threshold).astype(int)
+        return (vals > threshold).astype(int)
     elif threshold_mode == 'quantile':
         X = np.zeros_like(vals, dtype=int)
         for i in range(vals.shape[0]):
@@ -609,26 +622,47 @@ def load_node_matrix(data_file, threshold=0.5, threshold_mode='raw'):
                 continue
             cutoff = np.quantile(nz, threshold)
             X[i] = (row > cutoff).astype(int)
+        return X
     else:
         raise ValueError(f"Unknown threshold_mode: {threshold_mode!r} (expected 'raw' or 'quantile')")
 
-    return X, data[1:, 0].tolist(), node_names
+
+def rescale_01(x):
+    '''min-max rescale a vector to [0, 1]; constant input maps to all-1s'''
+    x = np.asarray(x, dtype=np.float64)
+    span = x.max() - x.min()
+    return np.ones_like(x) if span == 0 else (x - x.min()) / span
+
+
+def load_node_matrix(data_file, threshold=0.5, threshold_mode='raw'):
+    '''
+    load the subject x node matrix and return a binarized data matrix, the
+    raw (pre-binarization) values, the subject list, and the node/ROI names
+    (from the file's header row). See binarize() for threshold_mode.
+    '''
+    data       = np.genfromtxt(data_file, delimiter='\t', dtype=str)
+    node_names = data[0, 1:].tolist()
+    vals       = data[1:, 1:].astype(float)
+    X          = binarize(vals, threshold=threshold, threshold_mode=threshold_mode)
+    return X, vals, data[1:, 0].tolist(), node_names
 
 
 def load_data(data_file, data_path, score='Foreperiod_Long_tau', threshold=0.5,
              threshold_mode='raw', split_quantile=0.5):
     '''
-    load the subject x node matrix (see load_node_matrix for threshold_mode:
-    'raw' for lesion loads, 'quantile' for degree/node-strength), match
-    subjects to their behaviour score in participants.tsv, drop subjects
-    with missing behaviour from both the list and the data matrix, and
-    return the clean binarized data matrix alongside a quantile-thresholded
-    behaviour vector (value > quantile(behaviour, split_quantile) -> 1,
-    else -1), the subject list, missing-score list, and node/ROI names
-    (unaffected by subject-level filtering). Quantile-based splitting is
-    robust to non-normal behaviour distributions, unlike z-scoring.
+    load the subject x node matrix (see load_node_matrix/binarize for
+    threshold_mode: 'raw' for lesion loads, 'quantile' for degree/node-
+    strength), match subjects to their behaviour score in participants.tsv,
+    drop subjects with missing behaviour from the list and both data
+    matrices, and return the clean binarized data matrix, the clean raw
+    (pre-binarization) values, a quantile-thresholded behaviour vector
+    (value > quantile(behaviour, split_quantile) -> 1, else -1), the
+    subject list, missing-score list, and node/ROI names (unaffected by
+    subject-level filtering). Quantile-based splitting is robust to
+    non-normal behaviour distributions, unlike z-scoring.
     '''
-    X, subject_list, node_names = load_node_matrix(data_file, threshold=threshold, threshold_mode=threshold_mode)
+    X, raw_vals, subject_list, node_names = load_node_matrix(
+        data_file, threshold=threshold, threshold_mode=threshold_mode)
 
     part      = np.genfromtxt(os.path.join(data_path, 'participants.tsv'), dtype=str, delimiter='\t')
     score_col = np.where(part[0] == score)[0][0]
@@ -645,6 +679,7 @@ def load_data(data_file, data_path, score='Foreperiod_Long_tau', threshold=0.5,
         behaviour.append(float(val[0]))
 
     X_clean             = X[keep_idx]
+    raw_vals_clean      = raw_vals[keep_idx]
     subject_list_clean  = [subject_list[i] for i in keep_idx]
     behaviour           = np.array(behaviour, dtype=np.float64)
 
@@ -662,13 +697,14 @@ def load_data(data_file, data_path, score='Foreperiod_Long_tau', threshold=0.5,
 
     keep_var            = row_std > 0
     X_clean             = X_clean[keep_var]
+    raw_vals_clean      = raw_vals_clean[keep_var]
     behaviour           = behaviour[keep_var]
     subject_list_clean  = [s for s, k in zip(subject_list_clean, keep_var) if k]
 
     cutoff = np.quantile(behaviour, split_quantile)
     y      = np.where(behaviour > cutoff, 1, -1)
 
-    return X_clean, y, behaviour, subject_list_clean, subjects_missing_score, node_names
+    return X_clean, raw_vals_clean, y, behaviour, subject_list_clean, subjects_missing_score, node_names
 
 
 
@@ -676,7 +712,7 @@ def load_data(data_file, data_path, score='Foreperiod_Long_tau', threshold=0.5,
 #          LOAD DATA            #
 #################################
 
-X, y, behaviour, subject_list, subjects_missing_score, node_names = load_data(
+X, raw_vals, y, behaviour, subject_list, subjects_missing_score, node_names = load_data(
     args.data_file, args.data_path, args.score,
     threshold=args.threshold, threshold_mode=args.threshold_mode, split_quantile=args.split_quantile
 )
@@ -706,6 +742,23 @@ log_msg(f"| UPDATE | Zero-variance nodes: {zero_var_nodes}/{X.shape[1]}, "
 # ---- behaviour indicator used to add an optional behaviour vertex to the ---- #
 # ---- co-occurrence multigraph (build_cooccurrence_graph) ---- #
 behaviour_high = y == 1
+
+# ---- behaviour-weighted lesion loads: weight each subject's raw (pre- ---- #
+# ---- binarization) values by their own 0-1 rescaled behaviour score, ---- #
+# ---- then binarize -- so behaviourally low-weighted subjects' lesions  ---- #
+# ---- are less likely to clear the threshold and contribute to co-      ---- #
+# ---- occurrence counts. Only meaningful under threshold_mode='raw':    ---- #
+# ---- 'quantile' mode is scale-invariant per subject row, so uniformly  ---- #
+# ---- rescaling a row has no effect on that subject's own binarization. ---- #
+if args.threshold_mode == 'quantile':
+    log_msg(f"| WARNING | threshold_mode='quantile' is scale-invariant per subject row — "
+            f"behaviour-weighting before thresholding will have no effect on X_beh_weighted")
+
+behaviour_weight_01 = rescale_01(behaviour)
+X_beh_weighted = binarize(raw_vals * behaviour_weight_01[:, np.newaxis],
+                          threshold=args.threshold, threshold_mode=args.threshold_mode)
+log_msg(f"| UPDATE | Behaviour-weighted X fraction of ones: {X_beh_weighted.mean():.4f} "
+        f"(unweighted: {X.mean():.4f})")
 
 
 
@@ -756,6 +809,21 @@ blocks_no_beh = get_blocks(state_no_beh)
 log_msg(f"| UPDATE | Fit complete without behaviour node ({len(np.unique(blocks_no_beh))} blocks)")
 log_hierarchy(state_no_beh, 'no-behaviour')
 
+# ---- co-occurrence graph from behaviour-weighted lesion loads (no ---- #
+# ---- behaviour node -- behaviour is baked into which lesions survive  ---- #
+# ---- thresholding, not injected as a separate vertex or partition bias) ---- #
+log_msg(f"| UPDATE | Building co-occurrence graph from behaviour-weighted lesion loads")
+g_cooc_beh_weighted = build_cooccurrence_graph(X_beh_weighted)
+log_msg(f"| UPDATE | Co-occurrence graph (behaviour-weighted): {g_cooc_beh_weighted.num_vertices()} nodes, "
+        f"{g_cooc_beh_weighted.num_edges()} multi-edges")
+
+log_msg(f"| UPDATE | Fitting latent multigraph SBM on behaviour-weighted co-occurrence")
+state_beh_weighted, entropy_beh_weighted = fit_latent_multigraph(g_cooc_beh_weighted, **fit_kwargs)
+g_beh_weighted      = extract_latent_graph(state_beh_weighted)
+blocks_beh_weighted = get_blocks(state_beh_weighted)
+log_msg(f"| UPDATE | Fit complete on behaviour-weighted co-occurrence ({len(np.unique(blocks_beh_weighted))} blocks)")
+log_hierarchy(state_beh_weighted, 'behaviour-weighted')
+
 # ---- co-occurrence graph with an added behaviour vertex ---- #
 log_msg(f"| UPDATE | Building co-occurrence graph with behaviour node")
 g_cooc_with_beh = build_cooccurrence_graph(X, behaviour_high=behaviour_high)
@@ -768,7 +836,11 @@ state_with_beh, entropy_with_beh = fit_latent_multigraph(g_cooc_with_beh, **fit_
 g_with_beh       = extract_latent_graph(state_with_beh)
 blocks_with_beh  = get_blocks(state_with_beh)
 log_hierarchy(state_with_beh, 'with-behaviour')
-g_with_beh_brain = brain_only_graph(g_with_beh, behaviour_node)
+# three projections of the with-behaviour graph: (1) behaviour node removed,
+# (2) full graph as fitted, (3) only edges incident to behaviour (2 minus 1,
+# edge-wise) -- isolates which regions behaviour actually connects to.
+g_with_beh_brain      = brain_only_graph(g_with_beh, behaviour_node)
+g_with_beh_behaviour  = behaviour_only_graph(g_with_beh, behaviour_node)
 log_msg(f"| UPDATE | Fit complete with behaviour node ({len(np.unique(blocks_with_beh))} blocks)")
 
 # ---- behaviour-informed partition prior (pclabel), no behaviour node ---- #
@@ -822,6 +894,7 @@ atlas_img      = nib.load(atlas_nii_path)
 atlas_data     = np.asarray(atlas_img.dataobj, dtype=np.int32)
 
 for label, state in [('no_beh', state_no_beh),
+                     ('beh_weighted', state_beh_weighted),
                      ('beh_node', state_with_beh),
                      ('pclabel', state_pclabel)]:
     for level in [0, 1]:
@@ -855,6 +928,11 @@ state_no_beh_path = os.path.join(args.out_dir, 'recon_no_beh_state.pkl')
 with open(state_no_beh_path, 'wb') as f:
     pickle.dump(state_no_beh, f)
 log_msg(f"| UPDATE | Block state saved (no behaviour node) → {state_no_beh_path}")
+
+state_beh_weighted_path = os.path.join(args.out_dir, 'recon_beh_weighted_state.pkl')
+with open(state_beh_weighted_path, 'wb') as f:
+    pickle.dump(state_beh_weighted, f)
+log_msg(f"| UPDATE | Block state saved (behaviour-weighted) → {state_beh_weighted_path}")
 
 state_with_beh_path = os.path.join(args.out_dir, 'recon_beh_node_state.pkl')
 with open(state_with_beh_path, 'wb') as f:
@@ -893,7 +971,13 @@ graph_pclabel_path = os.path.join(args.out_dir, 'recon_pclabel_graph.gt')
 g_pclabel.save(graph_pclabel_path)
 log_msg(f"| UPDATE | Graph saved (pclabel) → {graph_pclabel_path}")
 
-# with-behaviour fit: both the full (brain + behaviour) graph and a brain-only projection of it
+graph_beh_weighted_path = os.path.join(args.out_dir, 'recon_beh_weighted_graph.gt')
+g_beh_weighted.save(graph_beh_weighted_path)
+log_msg(f"| UPDATE | Graph saved (behaviour-weighted) → {graph_beh_weighted_path}")
+
+# with-behaviour fit: the full (brain + behaviour) graph, a brain-only
+# projection (behaviour node removed), and a behaviour-only projection
+# (only edges incident to behaviour -- full minus brain-only, edge-wise)
 graph_with_beh_full_path = os.path.join(args.out_dir, 'recon_beh_node_graph_full.gt')
 g_with_beh.save(graph_with_beh_full_path)
 log_msg(f"| UPDATE | Graph saved (with behaviour node, full) → {graph_with_beh_full_path}")
@@ -902,12 +986,20 @@ graph_with_beh_brain_path = os.path.join(args.out_dir, 'recon_beh_node_graph_bra
 g_with_beh_brain.save(graph_with_beh_brain_path)
 log_msg(f"| UPDATE | Graph saved (with behaviour node, brain-only projection) → {graph_with_beh_brain_path}")
 
+graph_with_beh_behaviour_path = os.path.join(args.out_dir, 'recon_beh_node_graph_behaviour_only.gt')
+g_with_beh_behaviour.save(graph_with_beh_behaviour_path)
+log_msg(f"| UPDATE | Graph saved (with behaviour node, behaviour-only projection) → {graph_with_beh_behaviour_path}")
+
 # ---- visualisations ---- #
 # node/edge colour + alpha reflect behavioural relevance (region_behaviour_
 # relevance), not plain block colour — see draw_state()
 state_no_beh_draw_path = os.path.join(args.out_dir, 'recon_no_beh_state_draw.png')
 draw_state(state_no_beh, relevance, output=state_no_beh_draw_path, node_names=node_names)
 log_msg(f"| UPDATE | Block state visualisation saved (no behaviour node) → {state_no_beh_draw_path}")
+
+state_beh_weighted_draw_path = os.path.join(args.out_dir, 'recon_beh_weighted_state_draw.png')
+draw_state(state_beh_weighted, relevance, output=state_beh_weighted_draw_path, node_names=node_names)
+log_msg(f"| UPDATE | Block state visualisation saved (behaviour-weighted) → {state_beh_weighted_draw_path}")
 
 state_with_beh_draw_path = os.path.join(args.out_dir, 'recon_beh_node_state_draw.png')
 draw_state(state_with_beh, relevance, output=state_with_beh_draw_path, node_names=node_names)
@@ -921,6 +1013,10 @@ log_msg(f"| UPDATE | Block state visualisation saved (pclabel) → {state_pclabe
 entropy_no_beh_path = os.path.join(args.out_dir, 'recon_no_beh_entropy.png')
 plot_entropy(entropy_no_beh, 'no-behaviour', entropy_no_beh_path)
 log_msg(f"| UPDATE | Entropy trajectory saved (no behaviour node) → {entropy_no_beh_path}")
+
+entropy_beh_weighted_path = os.path.join(args.out_dir, 'recon_beh_weighted_entropy.png')
+plot_entropy(entropy_beh_weighted, 'behaviour-weighted', entropy_beh_weighted_path)
+log_msg(f"| UPDATE | Entropy trajectory saved (behaviour-weighted) → {entropy_beh_weighted_path}")
 
 entropy_with_beh_path = os.path.join(args.out_dir, 'recon_beh_node_entropy.png')
 plot_entropy(entropy_with_beh, 'with-behaviour', entropy_with_beh_path)
