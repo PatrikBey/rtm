@@ -144,6 +144,80 @@ def create_multilayer_graph(adjacency_matrices, behavioral_values, node_names,
 
 
 #########################
+#      NULL MODELS      #
+#########################
+
+def permute_behaviour(behaviour, rng):
+    """
+    Shuffle the subject -> behaviour-score assignment, leaving lesion data
+    untouched. Used to build the behaviour-permutation null: it breaks the
+    subject-specific link between lesion pattern and behaviour while
+    preserving the cohort's lesion topology and score distribution.
+
+    Parameters
+    ----------
+    behaviour : sequence of float, length n_patients
+    rng       : np.random.Generator
+
+    Returns
+    -------
+    list of float, length n_patients
+    """
+    return rng.permutation(np.asarray(behaviour, dtype=float)).tolist()
+
+
+def quick_fit_dl(graph, behaviour_dist='normal', cooccurrence_dist='normal', seed=42):
+    """
+    Fast, single-shot nested-SBM fit used as the test statistic for null-model
+    comparisons. Uses the same LayeredBlockState construction as
+    fit_nested_sbm_layered but skips the MCMC change-point search and
+    posterior accumulation — a single gt.minimize_nested_blockmodel_dl call
+    is enough to compare relative description length / block count across
+    many permutations without the cost of the full pipeline.
+
+    Parameters
+    ----------
+    graph              : graph_tool.Graph from create_multilayer_graph()
+    behaviour_dist     : 'normal' or 'poisson'
+    cooccurrence_dist  : 'normal' or 'poisson'
+    seed               : int — graph_tool RNG seed
+
+    Returns
+    -------
+    dict with keys: 'entropy', 'n_levels', 'meaningful_levels', 'level0_n_blocks'
+    """
+    gt.seed_rng(seed)
+    g = graph.copy()
+
+    state = gt.minimize_nested_blockmodel_dl(
+        g,
+        state_args=dict(
+            base_type=gt.LayeredBlockState,
+            state_args=dict(
+                ec=g.ep.layer,
+                recs=[g.ep.behaviour_weight, g.ep.cooccurrence_weight],
+                rec_types=[_DIST_TO_REC[behaviour_dist], _DIST_TO_REC[cooccurrence_dist]],
+                layers=True,
+                deg_corr=True
+            )
+        )
+    )
+
+    levels    = state.get_levels()
+    n_levels  = len(levels)
+    entropies = [lv.entropy() for lv in levels]
+    floor     = min(entropies)
+    meaningful_levels = [k for k in range(n_levels) if entropies[k] > floor]
+
+    return {
+        'entropy':           state.entropy(),
+        'n_levels':          n_levels,
+        'meaningful_levels': meaningful_levels,
+        'level0_n_blocks':   levels[0].get_nonempty_B(),
+    }
+
+
+#########################
 #     SBM FITTING       #
 #########################
 
