@@ -489,6 +489,12 @@ def fit_nested_sbm_layered(graph,
         block_connectivity[k] = _aggregate_mrs_to_level(k, modal_assignments[k])
         log_msg(f'| UPDATE | finished aggregating mrs to level {k}')
 
+    # _aggregate_mrs_to_level closes over b0_history/mrs0_history/b_history,
+    # which creates a reference cycle (frame -> function -> cell -> frame) that
+    # keeps those large per-sample buffers alive until the next cyclic GC pass.
+    # Drop the closure and buffers now that they're no longer needed.
+    del _aggregate_mrs_to_level, b0_history, mrs0_history, b_history
+
     # ---- Compile results ---- #
     _levels_final = state.get_levels()
 
@@ -713,6 +719,12 @@ def fit_nested_sbm_layered_multiflip(graph,
         log_msg(f'| UPDATE | aggregating mrs to level {k} (multiflip)')
         block_connectivity[k] = _aggregate_mrs_to_level(k, modal_assignments[k])
         log_msg(f'| UPDATE | finished aggregating mrs to level {k} (multiflip)')
+
+    # _aggregate_mrs_to_level closes over b0_history/mrs0_history/b_history,
+    # which creates a reference cycle (frame -> function -> cell -> frame) that
+    # keeps those large per-sample buffers alive until the next cyclic GC pass.
+    # Drop the closure and buffers now that they're no longer needed.
+    del _aggregate_mrs_to_level, b0_history, mrs0_history, b_history
 
     _levels_final = state.get_levels()
 

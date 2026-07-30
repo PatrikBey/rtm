@@ -25,16 +25,10 @@
 #################################
 
 import os
+import gc
 import csv
 import argparse
-import graph_tool.all as gt
-from graph_tool import draw
 import matplotlib.pyplot as plt
-import matplotlib.cm
-import matplotlib.colors as mcolors
-from matplotlib.colors import Normalize, ListedColormap, to_rgba
-from matplotlib.lines import Line2D
-from matplotlib.collections import LineCollection
 import numpy as np
 import nibabel as nib
 
@@ -72,6 +66,9 @@ args.add_argument('--combined_layers', action=argparse.BooleanOptionalAction, de
                        'structure (intersection). Must match the setting used for the real run.')
 args.add_argument('--n_permutations', type=int, default=1000,
                   help='Number of behaviour-permutation null iterations (default: 1000)')
+args.add_argument('--start_perm', type=int, default=0,
+                  help='Permutation index to start from (default: 0). Use to resume a run '
+                       'without overwriting already-completed perm_XXXXX directories.')
 args = args.parse_args()
 
 log_msg(f"| START | Behaviour-permutation null model")
@@ -80,7 +77,7 @@ log_msg(f"| UPDATE | Behaviour score: {args.score}")
 log_msg(f"| UPDATE | Permutations: {args.n_permutations}")
 
 
-output_dir = os.path.join(args.data_path, 'SBMNULL', f'SBM_{args.atlas}_{args.score}_NULL')
+output_dir = os.path.join(args.data_path, 'SBMNULL', f'SBM_{args.atlas}_{args.score}_NULL_29')
 
 if not os.path.isdir(output_dir):
     os.mkdir(output_dir)
@@ -101,9 +98,6 @@ atlas_meta = np.genfromtxt(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_
                            dtype=str, delimiter='\t')[0, :].tolist()
 node_names = np.genfromtxt(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_areas.txt'),
                            dtype=str, delimiter='\t')[1:, atlas_meta.index('label')].tolist()
-locations  = np.genfromtxt(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_areas.txt'),
-                           dtype=str, delimiter='\t')[1:, atlas_meta.index('region')].tolist()
-dim = len(node_names)
 
 subject_list_clean, behaviour, adj_matrices, subjects_missing_score, empty_subjects = load_graphs(
     args.data_path, args.atlas, subject_list, part, score_col)
@@ -115,22 +109,8 @@ log_msg(f"| UPDATE | Empty disconnectome: {len(empty_subjects)}")
 
 
 #################################
-#    NODE COLOUR / LOCATIONS    #
+#           ATLAS DATA          #
 #################################
-
-# Locations are a fixed mapping from atlas ROIs to canonical anatomical areas —
-# consistent across atlases and across permutations, so these are built once.
-loc_colours = [
-    'mediumvioletred', 'deeppink', 'indigo', 'mediumslateblue', 'steelblue',
-    'deepskyblue', 'teal', 'mediumturquoise', 'darkgreen', 'limegreen',
-    'olivedrab', 'yellowgreen', 'darkorange', 'gold', 'firebrick', 'lightcoral'
-]
-locations         = [f'{loc}_L' if idx < dim / 2 else f'{loc}_R' for idx, loc in enumerate(locations)]
-unique_locations  = sorted(set(locations))
-node_color        = [loc_colours[unique_locations.index(loc)] for loc in locations]
-
-coord_data = np.loadtxt(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_circle_coords_sorted.txt'),
-                        delimiter='\t', skiprows=1, usecols=(0, 1))
 
 atlas_nii_path = os.path.join(args.data_path, 'ATLAS', f'{args.atlas}.nii.gz')
 atlas_img      = nib.load(atlas_nii_path)
@@ -145,12 +125,17 @@ def _save_permutation_outputs(perm_dir, graph, results):
     """
     Persist a single permutation's fit outputs: final graph, entropy
     trajectories, ROI block-assignment table (including per-ROI block
-    z-scores for every meaningful level), entropy-trajectory plot, final
-    state.draw() visualisation, block scores/connectivity tables, and the
-    combined block z-score NIfTI (the only NIfTI output produced here).
-    Block z-scores are the statistic later compared against the null
-    distribution built by concatenating roi_block_assignments across
-    permutations.
+    z-scores for every meaningful level), entropy-trajectory plot, block
+    scores/connectivity tables, and the combined block z-score NIfTI (the
+    only NIfTI output produced here). Block z-scores are the statistic later
+    compared against the null distribution built by concatenating
+    roi_block_assignments across permutations.
+
+    No per-permutation state-drawing visualisation is produced here — the
+    saved final graph (.gt) and roi_block_assignments CSV (per-node block
+    labels per level) carry everything visualizations/create_figures.py's
+    utils.plot_sbm_state() needs to redraw the block state later, on demand,
+    from disk (see how it's used for the real/unpermuted run's outputs).
     """
 
     state_nested       = results['state']
@@ -301,78 +286,6 @@ def _save_permutation_outputs(perm_dir, graph, results):
     log_msg(f"| UPDATE | Entropy trajectory saved "
             f"(converged={converged}, iter={conv_iter}, {n_conv} accumulation samples)")
 
-    # ---- Graph visualisation (graph_tool draw, level-0 modal partition) ---- #
-    pos = g.new_vertex_property("vector<double>")
-    for v in g.vertices():
-        pos[v] = coord_data[int(v)].tolist()
-
-    n_locations = len(unique_locations)
-    distinct_colors = [to_rgba(c) for c in loc_colours]
-    cmap = ListedColormap(distinct_colors)
-    norm = Normalize(vmin=0, vmax=max(n_locations - 1, 1))
-    location_name_to_idx = {name: idx for idx, name in enumerate(unique_locations)}
-
-    vertex_color = g.new_vertex_property("vector<double>")
-    vertex_shape = g.new_vertex_property("int")
-    for v in g.vertices():
-        node_idx     = int(v)
-        location     = locations[node_idx]
-        side         = location.rsplit('_', 1)[1]
-        location_idx = location_name_to_idx[location]
-        rgba         = cmap(norm(location_idx))
-        vertex_color[v] = rgba
-        vertex_shape[v] = 0 if side == 'L' else 1
-
-    degree_map   = g.degree_property_map("in")
-    vertex_sizes = gt.prop_to_size(degree_map, mi=20, ma=50)
-
-    _e_alpha_min   = 0.03
-    _e_alpha_gamma = 1.0
-
-    beh_weight_lookup = {}
-    for e in g.edges():
-        if g.ep.layer[e] == 0:
-            key = (min(int(e.source()), int(e.target())),
-                   max(int(e.source()), int(e.target())))
-            beh_weight_lookup[key] = float(g.ep.behaviour_weight[e])
-
-    raw_beh = np.array([
-        beh_weight_lookup.get(
-            (min(int(e.source()), int(e.target())),
-             max(int(e.source()), int(e.target()))), 0.0)
-        for e in g.edges()
-    ])
-
-    clipped = np.maximum(raw_beh, 0.0)
-    w_max   = clipped.max() if clipped.max() > 0 else 1.0
-    edge_alpha_arr = _e_alpha_min + (1.0 - _e_alpha_min) * (clipped / w_max) ** _e_alpha_gamma
-
-    edge_color = g.new_edge_property("vector<double>")
-    for idx, e in enumerate(g.edges()):
-        src_c   = vertex_color[e.source()]
-        tgt_c   = vertex_color[e.target()]
-        avg_rgb = [(src_c[c] + tgt_c[c]) / 2 for c in range(3)]
-        avg_rgb.append(float(edge_alpha_arr[idx]))
-        edge_color[e] = tuple(avg_rgb)
-
-    state_nested.draw(
-        pos=pos,
-        vertex_fill_color=vertex_color,
-        vertex_shape=vertex_shape,
-        vertex_size=vertex_sizes,
-        vertex_pen_width=0.5,
-        edge_color=edge_color,
-        edge_pen_width=gt.prop_to_size(g.ep.behaviour_weight, mi=0.5, ma=3),
-        edge_gradient=[],
-        vertex_text=g.vp.label,
-        vertex_text_color='black',
-        vertex_text_position=0,
-        vertex_font_size=10,
-        output=os.path.join(perm_dir, f"RF_weighted_nested_block_state_draw_{args.score}.png"),
-        output_size=(1200, 1200)
-    )
-    log_msg(f"| UPDATE | Graph visualisation saved")
-
     #################################
     #    BLOCK COMMUNITY VOLUME     #
     #################################
@@ -417,10 +330,15 @@ def _save_permutation_outputs(perm_dir, graph, results):
 #     PERMUTATION NULL LOOP     #
 #################################
 
-rng = np.random.default_rng(args.seed)
-
-for perm_idx in range(args.n_permutations):
+for perm_idx in range(args.start_perm, args.n_permutations):
     perm_seed = args.seed + perm_idx
+    # Per-permutation RNG keyed on perm_seed (rather than one shared RNG
+    # advanced across the whole loop) so each permutation's behaviour shuffle
+    # only depends on its own index, not on how many permutations ran before
+    # it — this lets a run be resumed at --start_perm and still reproduce
+    # exactly the shuffles a single unbroken 0..n_permutations run would have
+    # produced for those indices.
+    rng = np.random.default_rng(perm_seed)
     perm_dir  = os.path.join(output_dir, f'perm_{perm_idx:05d}')
     if not os.path.isdir(perm_dir):
         os.makedirs(perm_dir)
@@ -460,5 +378,14 @@ for perm_idx in range(args.n_permutations):
     )
 
     _save_permutation_outputs(perm_dir, graph, results)
+
+    # `results['state']` (graph_tool NestedBlockState) and the accumulation
+    # buffers inside fit_nested_sbm_layered form reference cycles (nested
+    # closures, parent/child block-state links) that plain refcounting can't
+    # reclaim. Breaking the references here and forcing a cyclic collection
+    # keeps peak memory bounded across permutations instead of growing until
+    # the process is OOM-killed.
+    del results, graph
+    gc.collect()
 
 log_msg(f"| FINISHED | Null model outputs saved → {output_dir}")
