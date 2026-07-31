@@ -32,6 +32,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import nibabel as nib
 
+import graph_tool.all as gt
+
 from functions import create_multilayer_graph, permute_behaviour
 from functions import fit_nested_sbm_layered
 from utils import load_graphs, log_msg, get_graph_layers
@@ -69,7 +71,11 @@ args.add_argument('--n_permutations', type=int, default=1000,
 args.add_argument('--start_perm', type=int, default=0,
                   help='Permutation index to start from (default: 0). Use to resume a run '
                        'without overwriting already-completed perm_XXXXX directories.')
+args.add_argument('--n_threads', type=int, default=4,
+                  help='OpenMP threads for graph_tool MCMC fitting (default: 4)')
 args = args.parse_args()
+
+gt.openmp_set_num_threads(args.n_threads)
 
 log_msg(f"| START | Behaviour-permutation null model")
 log_msg(f"| UPDATE | Data path: {args.data_path}")
@@ -80,7 +86,7 @@ log_msg(f"| UPDATE | Permutations: {args.n_permutations}")
 output_dir = os.path.join(args.data_path, 'SBMNULL', f'SBM_{args.atlas}_{args.score}_NULL_29')
 
 if not os.path.isdir(output_dir):
-    os.mkdir(output_dir)
+    os.makedirs(output_dir)
 
 
 #################################
