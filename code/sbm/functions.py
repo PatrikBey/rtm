@@ -143,6 +143,73 @@ def create_multilayer_graph(adjacency_matrices, behavioral_values, node_names,
     return g
 
 
+def create_cooccurrence_graph(adjacency_matrices, node_names,
+                              edge_threshold=50, cooccurrence_dist='normal'):
+    """
+    Create a single-layer graph containing only the lesion cooccurrence
+    structure — the same cooccurrence-layer construction used inside
+    create_multilayer_graph(), on its own and with no behavioural
+    information attached.
+
+    Parameters
+    ----------
+    adjacency_matrices : ndarray, shape (n_patients, n_nodes, n_nodes)
+    node_names         : list, length n_nodes
+    edge_threshold     : float, percentile threshold applied to the
+                         cooccurrence layer (default 50)
+    cooccurrence_dist  : 'normal' or 'poisson'. If 'poisson', the layer is
+                         [0,1] min-max scaled before thresholding.
+
+    Returns
+    -------
+    graph : graph_tool.Graph with edge property 'cooccurrence_weight'
+    """
+    n_patients, n_nodes_dim1, n_nodes_dim2 = adjacency_matrices.shape
+    assert n_nodes_dim1 == n_nodes_dim2
+    assert len(node_names) == n_nodes_dim1
+    assert 0 <= edge_threshold <= 100
+
+    cooccurrence_binary = np.sum(adjacency_matrices, axis=0).astype(float)
+
+    # If cooccurrence layer uses Poisson, min-max scale to [0,1] to reduce
+    # scale impact (Poisson DL is not scale-invariant; raw counts would dominate)
+    if cooccurrence_dist == 'poisson':
+        nz = cooccurrence_binary[cooccurrence_binary > 0]
+        if nz.size > 0:
+            lo, hi = nz.min(), nz.max()
+            cooccurrence_binary[cooccurrence_binary > 0] = \
+                (cooccurrence_binary[cooccurrence_binary > 0] - lo) / (hi - lo) \
+                if hi > lo else 1.0
+
+    occ_nz = cooccurrence_binary[cooccurrence_binary > 0]
+    occ_thresh = np.percentile(occ_nz, edge_threshold) if occ_nz.size > 0 else 0
+    cooccurrence_binary[cooccurrence_binary < occ_thresh] = 0
+    occ_mask = cooccurrence_binary > 0
+
+    g = gt.Graph(directed=False)
+    g.add_vertex(n_nodes_dim1)
+
+    node_label_prop = g.new_vertex_property("string")
+    for idx in range(n_nodes_dim1):
+        node_label_prop[g.vertex(idx)] = str(node_names[idx])
+    g.vp.label = node_label_prop
+
+    cooccurrence_weight_prop = g.new_edge_property("double")
+
+    for i in range(n_nodes_dim1):
+        for j in range(i + 1, n_nodes_dim1):
+            if occ_mask[i, j]:
+                e = g.add_edge(g.vertex(i), g.vertex(j))
+                cooccurrence_weight_prop[e] = float(cooccurrence_binary[i, j])
+
+    g.ep.cooccurrence_weight = cooccurrence_weight_prop
+
+    g.gp.n_patients              = g.new_graph_property("int",    n_patients)
+    g.gp.edge_threshold_applied  = g.new_graph_property("string", str(occ_thresh))
+
+    return g
+
+
 #########################
 #      NULL MODELS      #
 #########################
@@ -756,7 +823,229 @@ def fit_nested_sbm_layered_multiflip(graph,
     return results
 
 
+def fit_nested_sbm(graph,
+                   max_iter=10000,
+                   window_size=500,
+                   shift_factor=0.5,
+                   cooccurrence_dist='poisson',
+                   seed=42):
+    """
+    Identical sampling strategy to fit_nested_sbm_layered (mean-shift
+    change-point detection + posterior accumulation), but fits a plain
+    single-layer NestedBlockState on the cooccurrence weight only — no
+    behavioural information enters the model.
 
-#########################
-#     SBM FITTING       #
-#########################
+    Parameters and return value are identical to fit_nested_sbm_layered,
+    minus the behaviour_dist parameter.
+    """
+
+    gt.seed_rng(seed)
+    g = graph.copy()
+
+    # ---- Initialise nested block state ---- #
+    state = gt.minimize_nested_blockmodel_dl(
+        g,
+        state_args=dict(
+            recs=[g.ep.cooccurrence_weight],
+            rec_types=[_DIST_TO_REC[cooccurrence_dist]],
+            deg_corr=True
+        )
+    )
+
+    n_verts = g.num_vertices()
+
+    # ---- Main MCMC loop with mean-shift change-point detection ---- #
+    entropy_traj      = []
+    converged         = False
+    conv_iter         = max_iter
+    first_window_mean = None
+    first_window_std  = None
+    threshold         = None
+
+    log_msg('| UPDATE | starting MCMC change-point detection loop (single-layer)')
+    with tqdm(total=max_iter, desc='MCMC', unit='iter') as pbar:
+        for i in range(max_iter):
+            state.mcmc_sweep(niter=1)
+            entropy_traj.append(state.entropy())
+
+            if i == window_size - 1:
+                first_window_mean = sum(entropy_traj) / window_size
+                first_window_std  = (
+                    sum((x - first_window_mean) ** 2 for x in entropy_traj) / window_size
+                ) ** 0.5
+                threshold = first_window_mean - shift_factor * first_window_std
+                pbar.set_postfix(ref=f'{first_window_mean:.1f}',
+                                 thr=f'{threshold:.1f}')
+
+            elif threshold is not None:
+                w_mean = sum(entropy_traj[-window_size:]) / window_size
+                if w_mean < threshold:
+                    converged = True
+                    conv_iter = i
+                    pbar.set_postfix(DL=f'{entropy_traj[-1]:.1f}',
+                                     w_mean=f'{w_mean:.1f}',
+                                     status='SHIFT')
+                    pbar.update(1)
+                    break
+
+            if i % 100 == 0:
+                pbar.set_postfix(DL=f'{entropy_traj[-1]:.1f}')
+            pbar.update(1)
+
+    dS = np.array(entropy_traj)
+
+    if converged:
+        log_msg(f'| UPDATE | mean-shift change point at iteration {conv_iter} '
+                f'| ref={first_window_mean:.2f}, std={first_window_std:.2f}, '
+                f'threshold={threshold:.2f}, shift_factor={shift_factor}')
+    else:
+        log_msg(f'| WARNING | no mean shift detected within {max_iter} iterations '
+                f'| ref={first_window_mean:.2f}, threshold={threshold:.2f} '
+                f'— using last {window_size} iterations. '
+                f'Consider increasing max_iter or reducing shift_factor '
+                f'(current: {shift_factor}).')
+
+    # ---- Meaningful levels ---- #
+    _levels_init    = state.get_levels()
+    n_levels        = len(_levels_init)
+    _entropies_init = [lv.entropy() for lv in _levels_init]
+    entropy_floor   = min(_entropies_init)
+    meaningful_levels = [k for k in range(n_levels)
+                         if _entropies_init[k] > entropy_floor]
+
+    # ---- Accumulation: window_size sweeps from converged state ---- #
+    b_history    = {k: [] for k in meaningful_levels}
+    b0_history   = []
+    mrs0_history = []
+
+    edge_M1 = np.zeros((n_verts, n_verts))
+    edge_M2 = np.zeros((n_verts, n_verts))
+
+    dS_converged = np.zeros(window_size)
+    log_msg(f'| UPDATE | accumulating {window_size} samples from converged state')
+    with tqdm(total=window_size, desc='Accumulation', unit='iter') as pbar:
+        for i in range(window_size):
+            state.mcmc_sweep(niter=1)
+            dS_converged[i] = state.entropy()
+
+            lv0         = state.get_levels()[0]
+            b0_arr      = lv0.get_blocks().a.copy()
+            mrs0_sparse = lv0.get_matrix()
+            mrs0_arr    = mrs0_sparse.toarray().astype(float) \
+                          if hasattr(mrs0_sparse, 'toarray') \
+                          else np.array(mrs0_sparse, dtype=float)
+            b0_history.append(b0_arr)
+            mrs0_history.append(mrs0_arr)
+
+            B0_size = mrs0_arr.shape[0]
+            b_clip  = np.minimum(b0_arr, B0_size - 1).astype(int)
+            vals    = mrs0_arr[np.ix_(b_clip, b_clip)]
+            edge_M1 += vals
+            edge_M2 += vals ** 2
+
+            for k in meaningful_levels:
+                proj  = state.project_partition(k, 0)
+                b_arr = proj.a.copy() if hasattr(proj, 'a') else \
+                        np.array([proj[v] for v in g.vertices()])
+                b_history[k].append(b_arr)
+
+            if i % 50 == 0:
+                pbar.set_postfix(DL=f'{dS_converged[i]:.1f}')
+            pbar.update(1)
+
+    edge_mean = edge_M1 / window_size
+    edge_var  = np.maximum(edge_M2 / window_size - edge_mean ** 2, 0.0)
+
+    # ---- Modal partitions + node assignment consistency (Cohen's Kappa) ---- #
+    modal_assignments = {}
+    node_consistency  = {}
+    for k in meaningful_levels:
+        pmode    = gt.PartitionModeState(b_history[k], converge=True)
+        b_mode   = pmode.get_max(g)
+        b_modal  = b_mode.a.copy() if hasattr(b_mode, 'a') else \
+                   np.array([b_mode[v] for v in g.vertices()])
+        modal_assignments[k] = b_modal
+
+        n_blocks  = int(b_modal.max()) + 1
+        chance    = 1.0 / n_blocks
+        n_samples = len(b_history[k])
+        marginals = pmode.get_marginal(g)
+        raw = np.array([
+            float(marginals[g.vertex(i)][int(b_modal[i])]) / n_samples
+            if int(b_modal[i]) < len(marginals[g.vertex(i)]) else 0.0
+            for i in range(n_verts)
+        ])
+        node_consistency[k] = (raw - chance) / (1.0 - chance)
+
+    # ---- Block connectivity (model-internal mrs) ---- #
+    def _aggregate_mrs_to_level(k, b_modal_k):
+        B_modal = int(b_modal_k.max()) + 1
+        accum   = np.zeros((B_modal, B_modal))
+
+        for i in range(window_size):
+            b0_iter  = b0_history[i]
+            mrs0_i   = mrs0_history[i]
+            b_k_iter = b_history[k][i]
+
+            B0_cur = mrs0_i.shape[0]
+            B0_nv  = int(b0_iter.max()) + 1
+
+            b0_to_bk = np.zeros(max(B0_cur, B0_nv), dtype=int)
+            for node in range(n_verts):
+                b0_to_bk[b0_iter[node]] = b_k_iter[node]
+
+            B_k_cur = int(b_k_iter.max()) + 1
+            remap   = np.zeros(B_k_cur, dtype=int)
+            for r in range(B_k_cur):
+                nodes_r = np.where(b_k_iter == r)[0]
+                if nodes_r.size > 0:
+                    remap[r] = int(
+                        np.bincount(b_modal_k[nodes_r],
+                                    minlength=B_modal).argmax()
+                    )
+
+            for r0 in range(min(B0_cur, B0_nv)):
+                r_modal = remap[b0_to_bk[r0]]
+                for s0 in range(min(B0_cur, B0_nv)):
+                    s_modal = remap[b0_to_bk[s0]]
+                    accum[r_modal, s_modal] += mrs0_i[r0, s0]
+
+        return accum / window_size
+
+    block_connectivity = {}
+    for k in meaningful_levels:
+        log_msg(f'| UPDATE | aggregating mrs to level {k}')
+        block_connectivity[k] = _aggregate_mrs_to_level(k, modal_assignments[k])
+        log_msg(f'| UPDATE | finished aggregating mrs to level {k}')
+
+    del _aggregate_mrs_to_level, b0_history, mrs0_history, b_history
+
+    # ---- Compile results ---- #
+    _levels_final = state.get_levels()
+
+    results = {
+        'state':                 state,
+        'entropy':               state.entropy(),
+        'n_levels':              n_levels,
+        'meaningful_levels':     meaningful_levels,
+        'levels_n_blocks':       [lv.get_nonempty_B() for lv in _levels_final],
+        'levels_entropy':        [lv.entropy()         for lv in _levels_final],
+        'entropy_trajectory':    dS,
+        'entropy_converged':     dS_converged,
+        'convergence_iteration': conv_iter,
+        'n_converged_samples':   window_size,
+        'converged':             converged,
+        'threshold':             threshold,
+        'first_window_mean':     first_window_mean,
+        'first_window_std':      first_window_std,
+        'modal_assignments':     modal_assignments,
+        'block_connectivity':    block_connectivity,
+        'node_consistency':      node_consistency,
+        'edge_mean':             edge_mean,
+        'edge_var':              edge_var,
+        'max_iter':              max_iter,
+        'window_size':           window_size,
+        'shift_factor':          shift_factor,
+    }
+
+    return results

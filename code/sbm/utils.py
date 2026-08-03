@@ -85,3 +85,15 @@ def get_graph_layers(graph):
         else:
             occ_layer[i, j] = occ_layer[j, i] = graph.ep.cooccurrence_weight[e]
     return [occ_layer, beh_layer]
+
+
+def get_cooccurrence_layer(graph):
+    '''
+    get adjacency matrix of a single-layer cooccurrence-only graph
+    '''
+    n = graph.num_vertices()
+    occ_layer = np.zeros((n, n))
+    for e in graph.edges():
+        i, j = int(e.source()), int(e.target())
+        occ_layer[i, j] = occ_layer[j, i] = graph.ep.cooccurrence_weight[e]
+    return occ_layer

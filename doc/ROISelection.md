@@ -10,20 +10,75 @@ Three output groups feed this:
 - **multilayer + observed behaviour** — `run.py` output (the real fit)
 
 Approaches 1-3 below are complementary filters; the entropy check is a global
-sanity gate, not a per-ROI filter. Not implemented here — outline only.
+sanity gate, not a per-ROI filter. Approach 1 is implemented (see below);
+Approaches 2-3 are outline only.
 
 
-## Approach 1: Null-referenced significance per ROI
+## Approach 1: Null-referenced significance
 
-**Idea:** for each ROI, ask whether its observed lvl0 block z-score is more
-extreme than the 100 z-scores obtained when behaviour was randomly shuffled.
-The null already holds lesion cooccurrence structure fixed and only breaks the
-true behaviour-lesion pairing, so a large deviation from that null is specific
-evidence of the real pairing, not an artefact of lesion topology or the SBM's
-general behaviour.
+**Idea:** ask whether an observed lvl0 grouping's behavioural coherence is more
+extreme than what the same SBM fit produces when behaviour is randomly
+shuffled. The null already holds lesion cooccurrence structure fixed and only
+breaks the true behaviour-lesion pairing, so a large deviation from that null
+is specific evidence of the real pairing, not an artefact of lesion topology
+or the SBM's general behaviour.
 
-Uses `permutation_zscores.tsv` (roi x permutation, already generated) plus the
-observed run's `roi_block_assignments_{score}.csv` (`zscore_0` column).
+Implemented for both available tasks (`Foreperiod_Long_tau`, `GoNoGo_tau`).
+Scripts live in `code/analysis/`; outputs in `{data_path}/ROISELECTION/`. The
+**current, canonical form tests at the block level** (below) — an earlier
+per-ROI version was tried first and is kept here as a documented dead end,
+since it explains why the block-level design looks the way it does.
+
+### Current implementation: block-level, max-statistic (`block_pvalues.py`)
+
+Tests each SBM block once, using its raw composite score rather than a
+per-ROI or z-scored value:
+
+- **Raw score, not z-score.** Uses the "score" column from
+  `SBM_block_scores_lvl{level}_{task}.csv` (consistency-weighted mean
+  `behaviour_degree` per block, i.e. `np.average(behaviour_degree,
+  weights=clip(node_consistency, 0))`) rather than the z-scored version. The
+  z-score re-normalizes across blocks *within one fit*, which isn't needed for
+  a permutation-based comparison and only adds fit-dependent noise (block
+  count varies from fit to fit).
+- **Max-statistic null, not matched block ids.** Block ids aren't comparable
+  across fits — each SBM fit (observed or permuted) discovers its own
+  independent partition, so "block 3" in permutation 47 has no relation to
+  "block 3" in the observed fit. Forcing a permutation's null value onto the
+  *observed* block's specific ROI membership was tried and rejected: that
+  membership was chosen by fitting on the real behaviour scores, so evaluating
+  random behaviour over that same fixed set is double-dipping / selection
+  bias — it never lets the null's own discovery process compete on equal
+  footing.
+
+  Instead, for each permutation, take the single highest raw block score
+  among *that permutation's own* freely-discovered blocks:
+
+  ```
+  null_max = [max(block_scores_of(perm)) for perm in null_permutations]   # 100 values
+
+  for block in observed_blocks:
+      p[block] = (count(null_max >= block.score) + 1) / (n_perm + 1)
+  ```
+
+  `null_max` is the sampling distribution of "the most behaviourally-coherent
+  grouping chance alone can produce" for that task — already inflated by the
+  fact that *some* block is always going to look best out of ~12-13 by chance,
+  which is exactly the effect that needs correcting for. Because every
+  observed block is compared against this same max-derived null, the test is
+  family-wise-error-controlled by construction; no separate BH-FDR step is
+  applied on top.
+
+**Result: 2/12 blocks significant (p < 0.05) for Foreperiod_Long_tau, 2/13 for
+GoNoGo_tau** — the only non-null result from this pipeline so far. Per-task
+tables (`block_pvalues_lvl0_{task}.tsv`) and significant-block NIfTIs
+(`{atlas}_lvl0_significant_blocks_{task}.nii.gz`, observed score kept only for
+significant blocks' member ROIs) are in `ROISELECTION/`; the two significant
+NIfTIs are also copied into `doc/`.
+
+### Superseded: per-ROI z-score + BH-FDR (`roi_pvalues.py`, `roi_pvalues_lvl1.py`)
+
+The original design tested every ROI individually:
 
 ```
 observed_z   = load_column(roi_block_assignments_observed.csv, "zscore_0")  # per ROI
@@ -35,6 +90,20 @@ for roi in rois:
 p_fdr = benjamini_hochberg(p)
 hits_1 = rois where p_fdr < alpha
 ```
+
+Still implemented (lvl0 and lvl1) and kept for reference, but **not the
+current recommendation** — it produced **0/400 ROIs significant at FDR < 0.05,
+at both levels, for both tasks**, even though GoNoGo_tau lvl0 had 24/400 ROIs
+with raw p < 0.05 before correction. Two compounding issues drove this:
+
+- **Pseudo-replication.** A block's z-score is broadcast identically to every
+  ROI it contains, so BH-FDR across 400 "ROIs" is really correcting for only
+  ~11-20 distinct values (one per block) repeated many times over — far more
+  punishing than warranted. This is what motivated testing at the block level
+  instead.
+- **Permutation floor.** With only 100 permutations, the smallest possible raw
+  p-value is `1/101 ≈ 0.0099`, which limits how far BH-FDR can push any
+  p-value down regardless of effect size.
 
 
 ## Approach 2: Residualize against the lesion-only layer

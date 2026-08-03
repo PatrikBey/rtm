@@ -83,7 +83,7 @@ log_msg(f"| UPDATE | Behaviour score: {args.score}")
 log_msg(f"| UPDATE | Permutations: {args.n_permutations}")
 
 
-output_dir = os.path.join(args.data_path, 'SBMNULL', f'SBM_{args.atlas}_{args.score}_NULL_29')
+output_dir = os.path.join(args.data_path, 'SBMNULL', f'SBM_{args.atlas}_{args.score}_NULL')
 
 if not os.path.isdir(output_dir):
     os.makedirs(output_dir)
