@@ -19,8 +19,18 @@
 #   distance      - Euclidean distance, in mm (world space via the      #
 #                  NIfTI affine, not raw voxel-index space), between a  #
 #                  mask's own centre of mass and the peak voxel.        #
-#   furthest point - the brain-mask voxel that maximises that distance; #
-#                  this is the centre of the first (index 0) mask.      #
+#   furthest point - the voxel that maximises that distance among the   #
+#                  seed candidates (--atlas non-zero voxels intersected #
+#                  with the brain mask if --atlas is given, otherwise   #
+#                  every non-zero brain-mask voxel); this is the centre #
+#                  of the first (index 0) mask. Restricting the seed to #
+#                  --atlas (e.g. a cortical parcellation) guarantees    #
+#                  map 0 starts in cortex rather than in deep white     #
+#                  matter/subcortical space that a surface projection   #
+#                  can never reach -- every other map's own voxels are  #
+#                  still drawn from the full brain mask as before, and  #
+#                  its centre is free to drift outside the atlas mask   #
+#                  as the trajectory approaches the peak.               #
 #                                                                       #
 # --n_maps evenly spaced centres (default 10) are linearly interpolated #
 # in world space between the furthest point (map 0) and the peak (last  #
@@ -88,6 +98,14 @@ parser.add_argument('--lesion_aggregate', type=str, required=True,
                     help='Path to a lesion-aggregate NIfTI (all patient lesion masks '
                          'overlapped into one image); its peak (argmax) voxel is the '
                          'convergence target of the trajectory')
+parser.add_argument('--atlas', type=str, default=None,
+                    help='Path to a parcellation NIfTI (e.g. Schaefer2018-400.nii.gz) whose '
+                         'non-zero voxels restrict the *furthest point* (map 0 centre) search '
+                         '-- resampled (nearest-neighbour) onto the brain_mask grid first if '
+                         'its shape/affine differs. Every mask\'s own voxels, including map 0\'s, '
+                         'are still drawn from the full --brain_mask, not the atlas -- this only '
+                         'restricts where the trajectory starts (default: None, i.e. search the '
+                         'full brain mask as before)')
 parser.add_argument('--out_dir', type=str, default='SUBSTRATES',
                     help='Output directory for the synthetic masks and distance table '
                          '(default: SUBSTRATES)')
@@ -145,6 +163,33 @@ if args.n_voxels > n_candidates:
 
 
 #################################
+#      ATLAS SEED REGION        #
+#################################
+
+if args.atlas:
+    from nilearn.image import resample_to_img
+
+    atlas_img = nib.load(args.atlas)
+    if atlas_img.shape != mask_data.shape or not np.allclose(atlas_img.affine, affine, atol=1e-3):
+        log_msg(f"| UPDATE | Atlas grid {atlas_img.shape} differs from brain_mask grid "
+                f"{mask_data.shape} -- resampling atlas onto brain_mask space (nearest-neighbour)")
+        atlas_img = resample_to_img(atlas_img, mask_img, interpolation='nearest')
+    atlas_data = np.asarray(atlas_img.dataobj)
+
+    # Intersect with the brain mask too, in case nearest-neighbour resampling
+    # introduced a few edge voxels just outside it.
+    seed_bool = (atlas_data > 0) & (mask_data > 0)
+    seed_ijk  = np.array(np.nonzero(seed_bool)).T
+    seed_xyz  = apply_affine(affine, seed_ijk)
+    log_msg(f"| UPDATE | Atlas seed region: {args.atlas}")
+    log_msg(f"| UPDATE | Atlas-restricted seed candidates: {seed_ijk.shape[0]} voxels "
+            f"(of {n_candidates} brain-mask voxels)")
+else:
+    seed_ijk = mask_ijk
+    seed_xyz = mask_xyz
+
+
+#################################
 #        LOCATE PEAK            #
 #################################
 
@@ -165,12 +210,12 @@ if mask_data[tuple(peak_ijk)] <= 0:
 #     LOCATE FURTHEST POINT     #
 #################################
 
-dist_to_peak = np.linalg.norm(mask_xyz - peak_xyz, axis=1)
+dist_to_peak = np.linalg.norm(seed_xyz - peak_xyz, axis=1)
 start_idx    = int(np.argmax(dist_to_peak))
-start_xyz    = mask_xyz[start_idx]
+start_xyz    = seed_xyz[start_idx]
 max_dist     = float(dist_to_peak[start_idx])
 
-log_msg(f"| UPDATE | Furthest point (ijk): {mask_ijk[start_idx].tolist()}, "
+log_msg(f"| UPDATE | Furthest point (ijk): {seed_ijk[start_idx].tolist()}, "
         f"distance to peak = {max_dist:.2f} mm")
 
 
