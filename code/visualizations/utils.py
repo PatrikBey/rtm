@@ -87,8 +87,10 @@ def make_cmap(colors, n=256):
 #      figure / axes helpers    #
 #################################
 
-def setup_views_figure(n_views=3, figsize=(18, 6)):
+def setup_views_figure(n_views=3, figsize=None):
     """Create a 1xN grid of 3-D axes, one per anatomical view."""
+    if figsize is None:
+        figsize = (6 * n_views, 6)
     fig, axes = plt.subplots(1, n_views, figsize=figsize,
                               subplot_kw={'projection': '3d'})
     fig.patch.set_facecolor('white')
@@ -213,9 +215,9 @@ def plot_surface_scalar(ax, vertices, faces, values, cmap='viridis', vmin=None, 
 
 
 def plot_block_surface(img, cmap='viridis', surface_opacity=0.05, brain_opacity=0.05, roi_opacity=0.3,
-                        positive_only=False):
+                        positive_only=False, views=None):
     """Project a scalar volume (e.g. SBM block z-scores) onto the cortical
-    surface and render it across the shared axial/coronal/sagittal views.
+    surface and render it across the given anatomical views.
 
     Takes the volume and a colormap — projection, view setup and styling
     are all handled internally so callers don't need to know about
@@ -225,10 +227,13 @@ def plot_block_surface(img, cmap='viridis', surface_opacity=0.05, brain_opacity=
     local parameters. `surface_opacity` is accepted for parity with that
     example but currently unused. If `positive_only` is set, only values
     greater than zero are colour-mapped (rest drawn as background).
+    `views` selects which of the shared VIEWS entries to render (default:
+    all three -- axial, coronal, sagittal).
 
     Returns (fig, axes).
     """
     background_color = (0.8, 0.8, 0.8)
+    views = views if views is not None else VIEWS
 
     hemi_surface = project_to_surface(img)
     all_verts = np.vstack([v for v, _, _ in hemi_surface.values()])
@@ -240,8 +245,9 @@ def plot_block_surface(img, cmap='viridis', surface_opacity=0.05, brain_opacity=
         valid_vals = valid_vals[valid_vals > 0]
     vmin, vmax = (valid_vals.min(), valid_vals.max()) if valid_vals.size else (0, 1)
 
-    fig, axes = setup_views_figure()
-    for ax, (view_name, elev, azim) in zip(axes, VIEWS):
+    fig, axes = setup_views_figure(n_views=len(views))
+    axes = np.atleast_1d(axes)
+    for ax, (view_name, elev, azim) in zip(axes, views):
         for vertices, faces, values in hemi_surface.values():
             plot_surface_scalar(ax, vertices, faces, values, cmap=cmap, vmin=vmin, vmax=vmax,
                                  background_color=background_color, background_opacity=brain_opacity,
@@ -393,6 +399,23 @@ def load_joint_adjacency(graph_path):
     for e in g.edges():
         i, j = int(e.source()), int(e.target())
         adj[i, j] = adj[j, i] = g.ep.behaviour_weight[e] + g.ep.cooccurrence_weight[e]
+    return adj
+
+
+def load_cooccurrence_adjacency(graph_path):
+    """Load a saved lesion-only base graph (run_base.py output) into a
+    plain adjacency matrix, using its single 'cooccurrence_weight' edge
+    property -- the lesion-only counterpart of load_joint_adjacency, which
+    expects both a behaviour_weight and cooccurrence_weight property on a
+    run.py multilayer graph. run_base.py's graph never had a behaviour
+    layer at all, so there is nothing to collapse.
+    """
+    g = gt.load_graph(graph_path)
+    n = g.num_vertices()
+    adj = np.zeros((n, n))
+    for e in g.edges():
+        i, j = int(e.source()), int(e.target())
+        adj[i, j] = adj[j, i] = g.ep.cooccurrence_weight[e]
     return adj
 
 

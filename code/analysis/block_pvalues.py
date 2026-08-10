@@ -75,8 +75,9 @@ from utils import log_msg
 args = argparse.ArgumentParser(description='Block-level max-statistic permutation test (ROISelection.md Approach 1, block variant).')
 args.add_argument('--data_path', type=str, default='/data/patrik/RT/RTM', help='Path to the data directory')
 args.add_argument('--atlas', type=str, default='Schaefer2018-400', help='Atlas name')
-args.add_argument('--tasks', type=str, nargs='+', default=['Foreperiod_Long_tau', 'GoNoGo_tau'],
-                  help='Behaviour scores to evaluate (default: both available tasks)')
+args.add_argument('--tasks', type=str, nargs='+',
+                  default=['Foreperiod_Long_tau', 'GoNoGo_tau', 'SATO_Accuracy_tau'],
+                  help='Behaviour scores to evaluate (default: all three available tasks)')
 args.add_argument('--level', type=int, default=0, help='Hierarchy level to test (default: 0)')
 args.add_argument('--alpha', type=float, default=0.05, help='Significance threshold (default: 0.05; '
                   'already family-wise controlled by the max-statistic, no further correction applied)')

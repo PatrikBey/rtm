@@ -74,24 +74,24 @@ args.add_argument('--combined_layers', action=argparse.BooleanOptionalAction, de
                   help='If set (default), threshold both layers jointly so they share the same '
                        'edge structure (intersection). Use --no-combined-layers to threshold each '
                        'layer independently, giving each its own edge set.')
+args.add_argument('--output_dir', type=str, default=None,
+                  help='Explicit output directory, overriding the default '
+                       '{data_path}/RESULTS/SBM_{atlas}_{score}_{singleflip,multiflip} naming '
+                       'convention (default: None, i.e. use the naming convention)')
 args = args.parse_args()
 
 log_msg(f"| START | Running multi-layer nested SBM on disconnectome data")
 log_msg(f"| UPDATE | Data path: {args.data_path}")
 log_msg(f"| UPDATE | Behaviour score: {args.score}")
 
-if args.multiflip:
+if args.output_dir:
+    output_dir = args.output_dir
+elif args.multiflip:
     output_dir = os.path.join(args.data_path, 'RESULTS', f'SBM_{args.atlas}_{args.score}_multiflip')
 else:
     output_dir = os.path.join(args.data_path, 'RESULTS', f'SBM_{args.atlas}_{args.score}_singleflip')
 
-# try:
-#     os.makedirs(output_dir, exist_ok=True)
-# except FileExistsError:
-#     pass  # WSL/NTFS can raise EEXIST spuriously
-
-if not os.path.isdir(output_dir):
-    os.mkdir(output_dir)
+os.makedirs(output_dir, exist_ok=True)
 
 #################################
 #          LOAD DATA            #

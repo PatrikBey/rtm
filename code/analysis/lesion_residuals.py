@@ -73,8 +73,9 @@ from utils import log_msg
 args = argparse.ArgumentParser(description='Residualize multilayer behaviour-block score against the lesion-only fit\'s block score (ROISelection.md Approach 2).')
 args.add_argument('--data_path', type=str, default='/data/patrik/RT/RTM', help='Path to the data directory')
 args.add_argument('--atlas', type=str, default='Schaefer2018-400', help='Atlas name')
-args.add_argument('--tasks', type=str, nargs='+', default=['Foreperiod_Long_tau', 'GoNoGo_tau'],
-                  help='Behaviour scores to evaluate (default: both available tasks)')
+args.add_argument('--tasks', type=str, nargs='+',
+                  default=['Foreperiod_Long_tau', 'GoNoGo_tau', 'SATO_Accuracy_tau'],
+                  help='Behaviour scores to evaluate (default: all three available tasks)')
 args.add_argument('--level', type=int, default=0, help='Hierarchy level to use for both fits (default: 0)')
 args.add_argument('--fit_suffix', type=str, default='_singleflip',
                   help='Suffix of the observed multilayer SBMFITTING run directory (default: _singleflip)')

@@ -23,7 +23,11 @@ breaks the true behaviour-lesion pairing, so a large deviation from that null
 is specific evidence of the real pairing, not an artefact of lesion topology
 or the SBM's general behaviour.
 
-Implemented for both available tasks (`Foreperiod_Long_tau`, `GoNoGo_tau`).
+Implemented for all three available tasks (`Foreperiod_Long_tau`, `GoNoGo_tau`,
+`SATO_Accuracy_tau`) — `SATO_Accuracy_tau` was added in a later run than the
+other two but through the identical pipeline (observed fit, lesion-only base
+fit, behaviour-permutation null), so it is an equally valid third task, not a
+provisional/pilot result.
 Scripts live in `code/analysis/`; outputs in `{data_path}/ROISELECTION/`. The
 **current, canonical form tests at the block level** (below) — an earlier
 per-ROI version was tried first and is kept here as a documented dead end,
@@ -70,11 +74,15 @@ per-ROI or z-scored value:
   applied on top.
 
 **Result: 2/12 blocks significant (p < 0.05) for Foreperiod_Long_tau, 2/13 for
-GoNoGo_tau** — the only non-null result from this pipeline so far. Per-task
-tables (`block_pvalues_lvl0_{task}.tsv`) and significant-block NIfTIs
+GoNoGo_tau, 0/13 for SATO_Accuracy_tau** — SATO_Accuracy_tau's own
+free-partition null test found no block whose behavioural coherence exceeded
+chance (minimum p = 0.24, block 11), so it is a genuine null result under this
+test rather than a gap in coverage. Per-task tables
+(`block_pvalues_lvl0_{task}.tsv`) and significant-block NIfTIs
 (`{atlas}_lvl0_significant_blocks_{task}.nii.gz`, observed score kept only for
-significant blocks' member ROIs) are in `ROISELECTION/`; the two significant
-NIfTIs are also copied into `doc/`.
+significant blocks' member ROIs) are in `ROISELECTION/`; all three tasks'
+significant-block NIfTIs are also copied into `doc/` (SATO_Accuracy_tau's is
+all-zero, reflecting the null result).
 
 ### Superseded: per-ROI z-score + BH-FDR (`roi_pvalues.py`, `roi_pvalues_lvl1.py`)
 
