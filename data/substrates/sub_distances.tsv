@@ -1,0 +1,11 @@
+map_index	sub_num	roi_tag	roi_name	roi_index	n_voxels	planned_distance_mm	achieved_distance_mm	centre_x_mm	centre_y_mm	centre_z_mm	filename
+0	1	V1	Striate_1_L	200	4087	107.8358	107.8358	-7.49	-97.39	-7.31	sub_01_V1.nii.gz
+1	2	ST	ST_2_L	140	2358	90.6516	90.6516	-58.74	-37.07	15.62	sub_02_ST.nii.gz
+2	3	IFG	IFG_1_L	42	4058	82.677	82.677	-53.08	19.23	11.48	sub_03_IFG.nii.gz
+3	4	SPL	SPL_3_L	135	2775	75.238	75.238	-19.73	-56.62	65.97	sub_04_SPL.nii.gz
+4	5	pCun	pCun_1_R	284	2471	69.3225	69.3225	13.14	-71.5	39.0	sub_05_pCun.nii.gz
+5	6	RSC	RSC_2_L	37	1375	63.3593	63.3593	-7.97	-51.96	9.34	sub_06_RSC.nii.gz
+6	7	PrCd	PrCd_1_L	116	1466	55.637	55.637	-29.85	-8.12	51.61	sub_07_PrCd.nii.gz
+7	8	IPL	IPL_1_R	299	2410	45.8049	45.8049	62.61	-25.81	38.05	sub_08_IPL.nii.gz
+8	9	ParOper	ParOper_1_R	345	1355	35.565	35.565	48.74	-21.24	18.59	sub_09_ParOper.nii.gz
+9	10	PrCd	PrCd_1_R	315	2385	17.7577	17.7577	27.44	-3.34	52.19	sub_10_PrCd.nii.gz

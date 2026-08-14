@@ -49,7 +49,20 @@ args.add_argument('--tasks', type=str, nargs='+', default=['Foreperiod_Long_tau'
                   help='Behaviour scores to visualise (default: all three tasks)')
 args.add_argument('--fit_suffix', type=str, default='_singleflip',
                   help='Suffix of the observed SBMFITTING run directory (default: _singleflip)')
+args.add_argument('--out_dir', type=str, default=None,
+                  help='Output directory for the figures (default: {data_path}/SBMFITTING/FIGURES)')
+args.add_argument('--ext', type=str, default='svg', choices=['svg', 'png'],
+                  help='Output image format (default: svg)')
+args.add_argument('--perm', type=str, default=None,
+                  help='If given (e.g. perm_00000), plot that behaviour-permutation null '
+                       'example from SBMNULL instead of the observed SBMFITTING fit -- same '
+                       'file layout (SBM_final_graph_{task}.gt, roi_block_assignments_{task}.csv) '
+                       'written by run_null.py, one directory per task under '
+                       '{data_path}/SBMNULL/SBM_{atlas}_{task}_NULL/{perm}/')
 args = args.parse_args()
+
+out_dir = args.out_dir or os.path.join(args.data_path, 'SBMFITTING', 'FIGURES')
+os.makedirs(out_dir, exist_ok=True)
 
 grouped_raw = np.genfromtxt(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_areas_grouped.txt'),
                             dtype=str, delimiter='\t')
@@ -67,7 +80,12 @@ node_groups = grouped_raw[1:, 2]
 # one adjacency per task (behaviour + cooccurrence collapsed into the
 # final MCMC-fitted multilayer graph), same as create_figures.py section 5.
 for task in args.tasks:
-    fit_dir = os.path.join(args.data_path, 'SBMFITTING', f'SBM_{args.atlas}_{task}{args.fit_suffix}')
+    if args.perm:
+        fit_dir = os.path.join(args.data_path, 'SBMNULL', f'SBM_{args.atlas}_{task}_NULL', args.perm)
+        tag = f'{task}_{args.perm}'
+    else:
+        fit_dir = os.path.join(args.data_path, 'SBMFITTING', f'SBM_{args.atlas}_{task}{args.fit_suffix}')
+        tag = task
 
     graph_path = os.path.join(fit_dir, f'SBM_final_graph_{task}.gt')
     if not os.path.isfile(graph_path):
@@ -81,7 +99,7 @@ for task in args.tasks:
     level_cols    = sorted((c for c in rows[0] if c.startswith('level_')), key=lambda c: int(c.split('_')[1]))
     block_of_node = [np.array([int(row[c]) for row in rows]) for c in level_cols]
 
-    output_prefix = os.path.join(fit_dir, f'SBM_final_state_{task}_joint')
+    output_prefix = os.path.join(out_dir, f'SBM_final_state_{tag}_joint')
     utils.plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour='gold',
-                         block_of_node=block_of_node)
-    print(f'Saved → {output_prefix}_blocks.svg (+ _blocks_legend.svg, _weights.svg)')
+                         block_of_node=block_of_node, output_ext=args.ext)
+    print(f'Saved → {output_prefix}_blocks.{args.ext} (+ _blocks_legend.{args.ext}, _weights.{args.ext})')

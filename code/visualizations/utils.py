@@ -178,20 +178,23 @@ def project_to_surface(img, mesh_name='fsaverage5', surface='pial', interpolatio
 
 def plot_surface_scalar(ax, vertices, faces, values, cmap='viridis', vmin=None, vmax=None,
                          background_color=(0.8, 0.8, 0.8), background_opacity=0.05, opacity=0.9,
-                         positive_only=False):
+                         positive_only=False, threshold=None):
     """Colour surface faces by the mean of their vertices' scalar `values`.
 
     Faces with no data (NaN — e.g. medial wall or non-cortical parcels)
     are drawn as translucent background cortex; all other faces are
-    colour-mapped regardless of sign, unless `positive_only` is set, in
-    which case zero/negative faces are treated as background too.
-    `vmin`/`vmax` default to the data's own (colour-mapped) range if not
-    given.
+    colour-mapped regardless of sign, unless `positive_only` is set (faces
+    <= 0 treated as background) or `threshold` is given (faces <=
+    threshold treated as background instead — `threshold` takes priority
+    if both are given). `vmin`/`vmax` default to the data's own
+    (colour-mapped) range if not given.
     """
     values = np.asarray(values)
     face_vals = np.nanmean(values[faces], axis=1)
     valid = ~np.isnan(face_vals)
-    if positive_only:
+    if threshold is not None:
+        valid &= face_vals > threshold
+    elif positive_only:
         valid &= face_vals > 0
 
     cmap_obj = cm.get_cmap(cmap)
@@ -215,7 +218,7 @@ def plot_surface_scalar(ax, vertices, faces, values, cmap='viridis', vmin=None, 
 
 
 def plot_block_surface(img, cmap='viridis', surface_opacity=0.05, brain_opacity=0.05, roi_opacity=0.3,
-                        positive_only=False, views=None):
+                        positive_only=False, threshold=None, views=None):
     """Project a scalar volume (e.g. SBM block z-scores) onto the cortical
     surface and render it across the given anatomical views.
 
@@ -226,7 +229,12 @@ def plot_block_surface(img, cmap='viridis', surface_opacity=0.05, brain_opacity=
     colour-mapped (data) faces, mirroring the disconnectome example's
     local parameters. `surface_opacity` is accepted for parity with that
     example but currently unused. If `positive_only` is set, only values
-    greater than zero are colour-mapped (rest drawn as background).
+    greater than zero are colour-mapped (rest drawn as background); if
+    `threshold` is given, only values greater than `threshold` are
+    colour-mapped instead (takes priority over `positive_only` if both are
+    given) — e.g. `threshold=1` to show only z > 1. Either way, `vmin`/
+    `vmax` are computed from just the surviving (colour-mapped) values, so
+    thresholding also rescales the colour range to that subset.
     `views` selects which of the shared VIEWS entries to render (default:
     all three -- axial, coronal, sagittal).
 
@@ -241,7 +249,9 @@ def plot_block_surface(img, cmap='viridis', surface_opacity=0.05, brain_opacity=
 
     all_vals = np.concatenate([vals for _, _, vals in hemi_surface.values()])
     valid_vals = all_vals[~np.isnan(all_vals)]
-    if positive_only:
+    if threshold is not None:
+        valid_vals = valid_vals[valid_vals > threshold]
+    elif positive_only:
         valid_vals = valid_vals[valid_vals > 0]
     vmin, vmax = (valid_vals.min(), valid_vals.max()) if valid_vals.size else (0, 1)
 
@@ -251,7 +261,7 @@ def plot_block_surface(img, cmap='viridis', surface_opacity=0.05, brain_opacity=
         for vertices, faces, values in hemi_surface.values():
             plot_surface_scalar(ax, vertices, faces, values, cmap=cmap, vmin=vmin, vmax=vmax,
                                  background_color=background_color, background_opacity=brain_opacity,
-                                 opacity=roi_opacity, positive_only=positive_only)
+                                 opacity=roi_opacity, positive_only=positive_only, threshold=threshold)
         finalize_view(ax, view_name, elev, azim, brain_aspect)
 
     return fig, axes
@@ -524,7 +534,7 @@ def block_membership_image(block_of_node, block_id, atlas_img):
 
 
 def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour='black', edge_alpha=0.5,
-                    min_edge_alpha=0.05, block_of_node=None, relevance=None):
+                    min_edge_alpha=0.05, block_of_node=None, relevance=None, output_ext='svg'):
     """
     Fit a single (non-layered, non-annealed) nested SBM to `adj`, then draw
     that same fitted state twice with graph_tool's state.draw() — once per
@@ -678,7 +688,7 @@ def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour=
         hedge_color=arrow_colour,
         hvertex_fill_color=arrow_colour,
         hvertex_color=arrow_colour,
-        output=f'{output_prefix}_blocks.svg',
+        output=f'{output_prefix}_blocks.{output_ext}',
         output_size=(800, 800),
     )
 
@@ -690,7 +700,7 @@ def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour=
     ax.legend(handles=legend_elements, loc='center', frameon=True, fontsize=9)
     ax.axis('off')
     plt.tight_layout()
-    plt.savefig(f'{output_prefix}_blocks_legend.svg', dpi=150, bbox_inches='tight', facecolor='white')
+    plt.savefig(f'{output_prefix}_blocks_legend.{output_ext}', dpi=150, bbox_inches='tight', facecolor='white')
     plt.close(fig)
 
     # ---- 2. degree-coloured/sized nodes, relevance- (or weight-) coloured edges ---- #
@@ -739,7 +749,7 @@ def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour=
         hedge_color=arrow_colour,
         hvertex_fill_color=arrow_colour,
         hvertex_color=arrow_colour,
-        output=f'{output_prefix}_weights.svg',
+        output=f'{output_prefix}_weights.{output_ext}',
         output_size=(800, 800),
     )
 

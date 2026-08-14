@@ -95,6 +95,9 @@ args.add_argument('--atlas', type=str, default=None,
                   help='Parcellation NIfTI whose per-ROI centres of mass are overlaid as scatter '
                        'points for anatomical reference (default: {repo_path}/data/ATLAS/'
                        'Schaefer2018-400.nii.gz). Pass an empty string to disable.')
+args.add_argument('--substrates', type=str, nargs='+', default=None,
+                  help='Substrate names to plot, e.g. sub_03_IFG (default: all sub_*_subset.tck '
+                       'found in arise_dir)')
 args = args.parse_args()
 
 substrate_dir = args.substrate_dir or os.path.join(args.repo_path, 'data', 'substrates')
@@ -102,9 +105,14 @@ arise_dir     = args.arise_dir or os.path.join(substrate_dir, 'arise')
 out_dir       = args.out_dir or os.path.join(arise_dir, 'FIGURES')
 os.makedirs(out_dir, exist_ok=True)
 
-tck_paths = sorted(glob.glob(os.path.join(arise_dir, 'substrate_*_subset.tck')))
+tck_paths = sorted(glob.glob(os.path.join(arise_dir, 'sub_*_subset.tck')))
 if not tck_paths:
-    raise SystemExit(f'No substrate_*_subset.tck files found in {arise_dir}')
+    raise SystemExit(f'No sub_*_subset.tck files found in {arise_dir}')
+if args.substrates:
+    wanted   = set(args.substrates)
+    tck_paths = [p for p in tck_paths if re.match(r'(sub_\d+_\w+)_subset\.tck', os.path.basename(p)).group(1) in wanted]
+    if not tck_paths:
+        raise SystemExit(f'None of --substrates {args.substrates} matched a sub_*_subset.tck in {arise_dir}')
 
 # Whole-brain candidate pool substrate_gen.py drew every substrate from --
 # used below, per substrate, to find the single farthest voxel from that
@@ -172,9 +180,9 @@ brain_aspect = [all_verts[:, i].max() - all_verts[:, i].min() for i in range(3)]
 
 for tck_path in tck_paths:
     fname = os.path.basename(tck_path)
-    m = re.match(r'(substrate_(\d+))_subset\.tck', fname)
+    m = re.match(r'(sub_(\d+)_\w+)_subset\.tck', fname)
     if not m:
-        print(f'Skipped {fname}: filename does not match substrate_XX_subset.tck')
+        print(f'Skipped {fname}: filename does not match sub_NN_TAG_subset.tck')
         continue
     substrate, idx = m.group(1), int(m.group(2))
 

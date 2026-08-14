@@ -52,7 +52,14 @@ args.add_argument('--tasks', type=str, nargs='+', default=['Foreperiod_Long_tau'
                   help='Behaviour scores to visualise (default: all three tasks)')
 args.add_argument('--base_suffix', type=str, default='_base_singleflip',
                   help='Suffix of the lesion-only SBMBASE run directory (default: _base_singleflip)')
+args.add_argument('--out_dir', type=str, default=None,
+                  help='Output directory for the figures (default: {data_path}/SBMBASE/FIGURES)')
+args.add_argument('--ext', type=str, default='svg', choices=['svg', 'png'],
+                  help='Output image format (default: svg)')
 args = args.parse_args()
+
+out_dir = args.out_dir or os.path.join(args.data_path, 'SBMBASE', 'FIGURES')
+os.makedirs(out_dir, exist_ok=True)
 
 grouped_raw  = np.genfromtxt(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_areas_grouped.txt'),
                              dtype=str, delimiter='\t')
@@ -78,7 +85,7 @@ for task in args.tasks:
     level_cols     = sorted((c for c in rows[0] if c.startswith('level_')), key=lambda c: int(c.split('_')[1]))
     block_of_node  = [np.array([int(row[c]) for row in rows]) for c in level_cols]
 
-    output_prefix = os.path.join(base_dir, f'SBM_final_state_{task}_lesiononly')
+    output_prefix = os.path.join(out_dir, f'SBM_final_state_{task}_lesiononly')
     utils.plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour='gold',
-                         block_of_node=block_of_node)
-    print(f'Saved → {output_prefix}_blocks.svg (+ _blocks_legend.svg, _weights.svg)')
+                         block_of_node=block_of_node, output_ext=args.ext)
+    print(f'Saved → {output_prefix}_blocks.{args.ext} (+ _blocks_legend.{args.ext}, _weights.{args.ext})')

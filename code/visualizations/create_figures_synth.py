@@ -47,33 +47,40 @@ args.add_argument('--synth_dir', type=str, default='SBMSYNTH',
                   help='Name of the folder (inside data_path) containing per-substrate SBM fits '
                        '(default: SBMSYNTH)')
 args.add_argument('--distances_table', type=str, default=None,
-                  help='Path to the substrate distance table written by substrate_gen.py '
-                       '(default: {data_path}/SUBSTRATES/substrate_distances.tsv)')
+                  help='Path to the substrate distance table written by substrate_gen_roi.py '
+                       '(default: {data_path}/SUBSTRATES/sub_distances.tsv)')
 args.add_argument('--level', type=int, default=0, help='Hierarchy level to visualise (default: 0)')
 args.add_argument('--substrates', type=str, nargs='+', default=None,
-                  help='Substrate names to visualise (default: auto-discover substrate_* '
+                  help='Substrate names to visualise (default: auto-discover sub_* '
                        'subdirectories of synth_dir)')
 args.add_argument('--out_dir', type=str, default=None,
                   help='Output directory for the PNGs (default: {data_path}/{synth_dir}/FIGURES)')
 args.add_argument('--views', type=str, nargs='+', default=None,
                   choices=['axial', 'coronal', 'sagittal'],
                   help='Subset of views to render (default: all three)')
+args.add_argument('--threshold', type=float, default=None,
+                  help='Only render z-score voxels greater than this value (rest drawn as '
+                       'background cortex); also appends "_th" to the output filename. '
+                       'Default: None, i.e. show the full range')
 args = args.parse_args()
 
 views = [v for v in utils.VIEWS if v[0] in args.views] if args.views else None
 filename_suffix = ('_' + '_'.join(args.views)) if args.views else ''
+filename_suffix += '_th' if args.threshold is not None else ''
 
 synth_dir  = os.path.join(args.data_path, args.synth_dir)
 out_dir    = args.out_dir or os.path.join(synth_dir, 'FIGURES')
 os.makedirs(out_dir, exist_ok=True)
 
-distances_path = args.distances_table or os.path.join(args.data_path, 'SUBSTRATES', 'substrate_distances.tsv')
+distances_path = args.distances_table or os.path.join(args.data_path, 'SUBSTRATES', 'sub_distances.tsv')
 with open(distances_path, newline='') as fh:
     dist_rows = list(csv.DictReader(fh, delimiter='\t'))
 dist_by_substrate = {row['filename'].split('.')[0]: float(row['achieved_distance_mm']) for row in dist_rows}
+roi_name_by_substrate = {row['filename'].split('.')[0]: row['roi_name'] for row in dist_rows
+                         if 'roi_name' in row}
 
 substrates = args.substrates or sorted(
-    os.path.basename(d) for d in glob.glob(os.path.join(synth_dir, 'substrate_*'))
+    os.path.basename(d) for d in glob.glob(os.path.join(synth_dir, 'sub_*'))
     if os.path.isdir(d)
 )
 
@@ -106,11 +113,15 @@ for substrate in substrates:
 
     fig, axes = utils.plot_block_surface(block_img, cmap='plasma', surface_opacity=surface_opacity,
                                          brain_opacity=brain_opacity, roi_opacity=roi_opacity,
-                                         views=views)
+                                         threshold=args.threshold, views=views)
 
-    title = f'Distance to lesion peak: {dist:.2f} mm' if dist is not None else substrate
+    roi_name = roi_name_by_substrate.get(base_substrate)
+    label = f'{substrate} ({roi_name})' if roi_name else substrate
+    title = f'{label} -- distance to lesion peak: {dist:.2f} mm' if dist is not None else label
     if is_inverted:
         title += ' (inverted score)'
+    if args.threshold is not None:
+        title += f' (z > {args.threshold:g})'
     plt.suptitle(title, fontsize=14)
     plt.tight_layout()
 
