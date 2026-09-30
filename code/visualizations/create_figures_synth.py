@@ -32,6 +32,7 @@ import argparse
 
 import nibabel as nib
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 
 import utils
 
@@ -62,7 +63,60 @@ args.add_argument('--threshold', type=float, default=None,
                   help='Only render z-score voxels greater than this value (rest drawn as '
                        'background cortex); also appends "_th" to the output filename. '
                        'Default: None, i.e. show the full range')
+args.add_argument('--brain_opacity', type=float, default=0.05,
+                  help='Alpha of the no-data background cortex (default: 0.05)')
+args.add_argument('--roi_opacity', type=float, default=0.3,
+                  help='Alpha of the colour-mapped (data) faces (default: 0.3). Ignored if '
+                       '--roi_opacity_split is given.')
+args.add_argument('--roi_opacity_split', type=float, nargs=3, default=None,
+                  metavar=('PIVOT', 'ALPHA_BELOW', 'ALPHA_ABOVE'),
+                  help='Split alpha by value instead of a single --roi_opacity, e.g. '
+                       '"0 0.5 1.0" makes faces below 0 half-transparent and faces >= 0 '
+                       'fully opaque, independent of the colour mapping')
+args.add_argument('--brain_color', type=str, default='0.8,0.8,0.8',
+                  help='RGB of the no-data background cortex, comma-separated 0-1 floats '
+                       '(default: 0.8,0.8,0.8 -- grey)')
+args.add_argument('--shade_min', type=float, default=0.15,
+                  help='Darkest a fully-shadowed face can get, as a fraction of its base '
+                       'colour brightness (default: 0.15; lower = darker/more contrast, '
+                       '1.0 = no shading)')
+args.add_argument('--cmap', type=str, default='plasma',
+                  help='Matplotlib colormap name for the data-mapped faces (default: plasma), '
+                       'or a comma-separated list of 2+ hex colours (e.g. "#361a54,#993bff,'
+                       '#30d6ff") to build a custom linear colormap on the fly')
+args.add_argument('--cmap_range', type=float, nargs=2, default=[0.0, 1.0], metavar=('LO', 'HI'),
+                  help='Truncate --cmap to this sub-range (0-1) before mapping data onto it, '
+                       'e.g. "0.1 0.9" to avoid the very darkest/brightest ends of a colormap '
+                       '(default: 0.0 1.0, i.e. the full colormap)')
+args.add_argument('--surface_mesh', type=str, default='pial', choices=['pial', 'white', 'infl'],
+                  help='fsaverage surface geometry to project onto (default: pial)')
+args.add_argument('--interpolation', type=str, default='linear',
+                  choices=['linear', 'nearest_most_frequent'],
+                  help='vol_to_surf sampling interpolation (default: linear; '
+                       'nearest_most_frequent avoids blending values across ROI borders)')
+args.add_argument('--mesh_density', type=str, default='fsaverage5',
+                  choices=['fsaverage3', 'fsaverage4', 'fsaverage5', 'fsaverage6', 'fsaverage7', 'fsaverage'],
+                  help='fsaverage mesh resolution (default: fsaverage5, 10242 nodes/hemisphere; '
+                       'fsaverage6 = 40962, fsaverage7/fsaverage = 163842 -- finer mesh = '
+                       'smoother-looking ROI boundaries, more compute/memory')
+args.add_argument('--roi_outlines', action='store_true', default=False,
+                  help='Draw the parcellation\'s own ROI boundaries as thin outlines on top '
+                       'of the z-score fill, independent of colour/threshold (default: off)')
+args.add_argument('--outline_color', type=str, default='black',
+                  help='Colour of the ROI outlines (default: black)')
+args.add_argument('--outline_linewidth', type=float, default=0.3,
+                  help='Line width of the ROI outlines (default: 0.3)')
 args = args.parse_args()
+
+brain_color = tuple(float(c) for c in args.brain_color.split(','))
+cmap = (LinearSegmentedColormap.from_list('custom', args.cmap.split(','))
+        if args.cmap.startswith('#') else args.cmap)
+if tuple(args.cmap_range) != (0.0, 1.0):
+    import numpy as np
+    base = plt.get_cmap(cmap)
+    lo, hi = args.cmap_range
+    cmap = LinearSegmentedColormap.from_list(
+        'truncated', base(np.linspace(lo, hi, 256)))
 
 views = [v for v in utils.VIEWS if v[0] in args.views] if args.views else None
 filename_suffix = ('_' + '_'.join(args.views)) if args.views else ''
@@ -92,8 +146,10 @@ substrates = args.substrates or sorted(
 #####################################
 
 surface_opacity = 0.05
-brain_opacity   = 0.05
-roi_opacity     = 0.3
+brain_opacity   = args.brain_opacity
+roi_opacity     = tuple(args.roi_opacity_split) if args.roi_opacity_split else args.roi_opacity
+roi_atlas_img   = (nib.load(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}.nii.gz'))
+                   if args.roi_outlines else None)
 
 for substrate in substrates:
     fit_dir  = os.path.join(synth_dir, substrate)
@@ -111,9 +167,13 @@ for substrate in substrates:
 
     block_img = nib.load(img_path)
 
-    fig, axes = utils.plot_block_surface(block_img, cmap='plasma', surface_opacity=surface_opacity,
+    fig, axes = utils.plot_block_surface(block_img, cmap=cmap, surface_opacity=surface_opacity,
                                          brain_opacity=brain_opacity, roi_opacity=roi_opacity,
-                                         threshold=args.threshold, views=views)
+                                         threshold=args.threshold, views=views, brain_color=brain_color,
+                                         shade_min=args.shade_min, surface_mesh=args.surface_mesh,
+                                         interpolation=args.interpolation, mesh_density=args.mesh_density,
+                                         roi_atlas_img=roi_atlas_img, outline_color=args.outline_color,
+                                         outline_linewidth=args.outline_linewidth)
 
     roi_name = roi_name_by_substrate.get(base_substrate)
     label = f'{substrate} ({roi_name})' if roi_name else substrate

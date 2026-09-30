@@ -78,6 +78,10 @@ args.add_argument('--output_dir', type=str, default=None,
                   help='Explicit output directory, overriding the default '
                        '{data_path}/RESULTS/SBM_{atlas}_{score}_{singleflip,multiflip} naming '
                        'convention (default: None, i.e. use the naming convention)')
+args.add_argument('--participants', type=str, default=None,
+                  help='Path to participants.tsv, overriding the default {data_path}/'
+                       'participants.tsv -- e.g. to fit on a subject-filtered copy without '
+                       'touching the master file (default: None, i.e. {data_path}/participants.tsv)')
 args = args.parse_args()
 
 log_msg(f"| START | Running multi-layer nested SBM on disconnectome data")
@@ -100,7 +104,8 @@ os.makedirs(output_dir, exist_ok=True)
 # ---- disconnectomes and behaviour ---- #
 discos = os.listdir(os.path.join(args.data_path, 'DISCONNECTOMES'))
 subject_list = [f.split('_')[0] for f in discos if f.endswith(f'_{args.atlas}.tsv')]
-part = np.genfromtxt(os.path.join(args.data_path, 'participants.tsv'), dtype=str, delimiter='\t')
+participants_path = args.participants or os.path.join(args.data_path, 'participants.tsv')
+part = np.genfromtxt(participants_path, dtype=str, delimiter='\t')
 score_col = np.where(part[0] == args.score)[0][0]
 
 # ---- graph nodes ---- #

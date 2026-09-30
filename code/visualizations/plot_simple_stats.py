@@ -45,8 +45,6 @@ import os
 
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.stats import mannwhitneyu
-from statsmodels.stats.multitest import multipletests
 
 
 #################################
@@ -74,12 +72,6 @@ parser.add_argument('--summary_path', type=str, default=None,
                     help='Path to simple_stats_summary.tsv (default: {data_path}/simple_stats_summary.tsv)')
 parser.add_argument('--out_dir', type=str, default=None,
                     help='Output directory for the PNGs (default: {data_path}/FIGURES)')
-parser.add_argument('--sig_reference', type=str, default='Right Frontal',
-                    help='Reference location tested against every other location, within each '
-                         'behaviour, for the box-plot significance brackets (default: Right Frontal)')
-parser.add_argument('--sig_alpha', type=float, default=0.05,
-                    help='FDR-corrected significance threshold for the box-plot brackets '
-                         '(default: 0.05)')
 args = parser.parse_args()
 
 summary_path = args.summary_path or os.path.join(args.data_path, 'simple_stats_summary.tsv')

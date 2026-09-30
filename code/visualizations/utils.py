@@ -33,10 +33,10 @@ import nibabel as nib
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
-from matplotlib.colors import Normalize, LogNorm
+from matplotlib.colors import Normalize, LogNorm, LightSource
 from matplotlib.collections import PolyCollection
 from matplotlib.patches import Patch
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
 from skimage.measure import marching_cubes
 
 import graph_tool.all as gt
@@ -98,8 +98,15 @@ def setup_views_figure(n_views=3, figsize=None):
 
 
 def finalize_view(ax, view_name, elev, azim, aspect):
-    """Apply the shared view angle / styling used across all figures."""
-    ax.view_init(elev=elev, azim=azim)
+    """Apply the shared view angle / styling used across all figures.
+
+    `elev`/`azim` of None leaves matplotlib's own default 3-D camera angle
+    in place instead of forcing a rotation -- the axial/coronal/sagittal
+    angles in VIEWS are calibrated for pial anatomy and produce a
+    meaningless view on the inflated surface's very different geometry.
+    """
+    if elev is not None or azim is not None:
+        ax.view_init(elev=elev, azim=azim)
     ax.set_box_aspect(aspect)
     ax.set_facecolor('white')
     ax.axis('off')
@@ -164,21 +171,56 @@ def plot_glass_surface_2d(ax, meshes, color=(0.8, 0.8, 0.8), opacity=0.05, axes=
 def project_to_surface(img, mesh_name='fsaverage5', surface='pial', interpolation='linear'):
     """Project a scalar nifti volume onto both hemispheres of a surface mesh.
 
+    `surface='infl'` (inflated) cannot be sampled directly: its vertex
+    coordinates are an artificially unfolded layout, not real anatomical
+    space, so vol_to_surf finds no volume voxels near them (empty-sequence
+    error). Inflated and pial share the same vertex correspondence (same
+    count, same topology, just different positions), so in that case the
+    volume is sampled on the anatomically-real pial mesh and the resulting
+    per-vertex values are reused on the inflated mesh's geometry for display.
+
     Returns {hemi: (vertices, faces, projected_values)}.
     """
     fsaverage = fetch_surf_fsaverage(mesh=mesh_name)
+    sample_surface = 'pial' if surface == 'infl' else surface
     projected = {}
     for hemi in ('left', 'right'):
-        mesh_path = fsaverage[f'{surface}_{hemi}']
-        mesh = load_surf_mesh(mesh_path)
-        values = vol_to_surf(img, mesh_path, interpolation=interpolation)
-        projected[hemi] = (mesh.coordinates, mesh.faces, values)
+        sample_mesh_path = fsaverage[f'{sample_surface}_{hemi}']
+        display_mesh = load_surf_mesh(fsaverage[f'{surface}_{hemi}'])
+        values = vol_to_surf(img, sample_mesh_path, interpolation=interpolation)
+        projected[hemi] = (display_mesh.coordinates, display_mesh.faces, values)
     return projected
+
+
+def compute_roi_outline_edges(faces, roi_labels):
+    """Return the (N, 2, 3) vertex-index pairs for mesh edges that sit on a
+    boundary between two different ROI labels (both nonzero -- a 0 label is
+    treated as no-ROI/background, e.g. medial wall, and never outlined).
+    """
+    roi_labels = np.nan_to_num(roi_labels, nan=0).astype(int)
+    edges = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    a, b = edges[:, 0], edges[:, 1]
+    la, lb = roi_labels[a], roi_labels[b]
+    boundary = (la != lb) & (la > 0) & (lb > 0)
+    return edges[boundary]
+
+
+def plot_roi_outlines(ax, vertices, faces, roi_labels, color='black', linewidth=0.3, alpha=1.0):
+    """Draw a thin line along every mesh edge that separates two different
+    ROIs -- the parcellation's own boundaries, independent of any scalar
+    data mapped onto the same surface.
+    """
+    edge_idx = compute_roi_outline_edges(faces, roi_labels)
+    if len(edge_idx) == 0:
+        return
+    segments = vertices[edge_idx]
+    lc = Line3DCollection(segments, colors=color, linewidths=linewidth, alpha=alpha, zorder=10)
+    ax.add_collection3d(lc)
 
 
 def plot_surface_scalar(ax, vertices, faces, values, cmap='viridis', vmin=None, vmax=None,
                          background_color=(0.8, 0.8, 0.8), background_opacity=0.05, opacity=0.9,
-                         positive_only=False, threshold=None):
+                         positive_only=False, threshold=None, shade_min=0.15):
     """Colour surface faces by the mean of their vertices' scalar `values`.
 
     Faces with no data (NaN — e.g. medial wall or non-cortical parcels)
@@ -188,14 +230,29 @@ def plot_surface_scalar(ax, vertices, faces, values, cmap='viridis', vmin=None, 
     threshold treated as background instead — `threshold` takes priority
     if both are given). `vmin`/`vmax` default to the data's own
     (colour-mapped) range if not given.
+
+    `opacity` is normally a single float applied uniformly to every
+    colour-mapped face. It can instead be a `(pivot, alpha_below,
+    alpha_above)` 3-tuple to split alpha by value -- e.g. `(0, 0.5, 1.0)`
+    makes faces with value < 0 half-transparent and faces with value >= 0
+    fully opaque, independent of the colour mapping itself.
     """
     values = np.asarray(values)
-    face_vals = np.nanmean(values[faces], axis=1)
-    valid = ~np.isnan(face_vals)
+    # threshold at the VERTEX level (right after interpolation), not on the
+    # face mean: masking failing vertices to NaN before nanmean means a face
+    # is only dropped if ALL of its vertices fail, and a face that straddles
+    # the threshold keeps contributing its surviving vertex/vertices instead
+    # of being included/excluded as a unit based on an average that can sit
+    # on the wrong side of the threshold even when most vertices don't.
     if threshold is not None:
-        valid &= face_vals > threshold
+        vertex_valid = values > threshold
     elif positive_only:
-        valid &= face_vals > 0
+        vertex_valid = values > 0
+    else:
+        vertex_valid = ~np.isnan(values)
+    masked_values = np.where(vertex_valid, values, np.nan)
+    face_vals = np.nanmean(masked_values[faces], axis=1)
+    valid = ~np.isnan(face_vals)
 
     cmap_obj = cm.get_cmap(cmap)
     if vmin is None:
@@ -204,13 +261,34 @@ def plot_surface_scalar(ax, vertices, faces, values, cmap='viridis', vmin=None, 
         vmax = np.nanmax(face_vals[valid]) if valid.any() else 1
     norm = Normalize(vmin=vmin, vmax=vmax)
 
+    if isinstance(opacity, tuple):
+        pivot, alpha_below, alpha_above = opacity
+        face_alpha = np.where(face_vals[valid] < pivot, alpha_below, alpha_above)
+    else:
+        face_alpha = np.full(valid.sum(), opacity)
+
     face_rgba = np.empty((len(faces), 4))
     if valid.any():
-        face_rgba[valid] = [(*cmap_obj(norm(v))[:3], opacity) for v in face_vals[valid]]
+        face_rgba[valid] = [(*cmap_obj(norm(v))[:3], a) for v, a in zip(face_vals[valid], face_alpha)]
     face_rgba[~valid] = (*background_color, background_opacity)
 
-    poly = Poly3DCollection(vertices[faces], zsort='average')
-    poly.set_facecolors(face_rgba)
+    # Per-face lambertian shading, computed by hand rather than via
+    # Poly3DCollection's built-in shade=True: matplotlib's own _shade_colors
+    # hardcodes its darkest output at 30% brightness (Normalize(0.3, 1)),
+    # which can't be overridden through the public API and reads as flat/
+    # washed-out -- too little contrast to show sulcal depth. Computing the
+    # per-face normal and lambertian term ourselves, then remapping it to
+    # [shade_min, 1.0] (shade_min default 0.15, darker than matplotlib's
+    # floor), gives real control over how dark a deep sulcus gets.
+    tri = vertices[faces]
+    face_normals = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    face_normals /= np.linalg.norm(face_normals, axis=1, keepdims=True)
+    light_dir = LightSource(azdeg=315, altdeg=45).direction
+    lambert = face_normals @ light_dir
+    intensity = shade_min + (1 - shade_min) * np.clip((lambert + 1) / 2, 0, 1)
+    face_rgba[:, :3] *= intensity[:, np.newaxis]
+
+    poly = Poly3DCollection(vertices[faces], zsort='average', facecolors=face_rgba, shade=False)
     poly.set_edgecolors('none')
     ax.add_collection3d(poly)
 
@@ -218,7 +296,10 @@ def plot_surface_scalar(ax, vertices, faces, values, cmap='viridis', vmin=None, 
 
 
 def plot_block_surface(img, cmap='viridis', surface_opacity=0.05, brain_opacity=0.05, roi_opacity=0.3,
-                        positive_only=False, threshold=None, views=None):
+                        positive_only=False, threshold=None, views=None, brain_color=(0.8, 0.8, 0.8),
+                        shade_min=0.15, surface_mesh='pial', interpolation='linear', mesh_density='fsaverage5',
+                        roi_atlas_img=None, outline_color='black', outline_linewidth=0.3,
+                        vmin=None, vmax=None):
     """Project a scalar volume (e.g. SBM block z-scores) onto the cortical
     surface and render it across the given anatomical views.
 
@@ -233,17 +314,51 @@ def plot_block_surface(img, cmap='viridis', surface_opacity=0.05, brain_opacity=
     `threshold` is given, only values greater than `threshold` are
     colour-mapped instead (takes priority over `positive_only` if both are
     given) — e.g. `threshold=1` to show only z > 1. Either way, `vmin`/
-    `vmax` are computed from just the surviving (colour-mapped) values, so
-    thresholding also rescales the colour range to that subset.
+    `vmax` default to being computed from just the surviving (colour-mapped)
+    values, so thresholding also rescales the colour range to that subset --
+    pass `vmin`/`vmax` explicitly to override this (e.g. to plot two related
+    images, such as a null-permutation mean and the real fit it's compared
+    against, on the SAME colour scale rather than each auto-stretching to
+    its own range, which would visually hide a real difference in magnitude).
     `views` selects which of the shared VIEWS entries to render (default:
     all three -- axial, coronal, sagittal).
 
     Returns (fig, axes).
     """
-    background_color = (0.8, 0.8, 0.8)
-    views = views if views is not None else VIEWS
+    background_color = brain_color
+    if views is None:
+        # VIEWS' axial/coronal/sagittal angles are calibrated for pial anatomy
+        # and produce a meaningless rotation on the inflated surface's very
+        # different geometry -- fall back to matplotlib's own default 3-D
+        # camera angle (a single view) there instead of forcing those three.
+        views = [('default', None, None)] if surface_mesh == 'infl' else VIEWS
 
-    hemi_surface = project_to_surface(img)
+    hemi_surface = project_to_surface(img, mesh_name=mesh_density, surface=surface_mesh, interpolation=interpolation)
+
+    if surface_mesh == 'infl':
+        # Unlike pial (left x in [-68.8, 1.3], right x in [-0.2, 69.8] --
+        # properly separated at the real anatomical midline), fsaverage's
+        # inflated hemispheres are each independently centred on x=0 with
+        # the same extent, i.e. they sit directly on top of each other in
+        # 3-D space regardless of viewing angle. Shift them apart along x
+        # so they render as two distinct hemispheres instead of one
+        # confused overlapping blob.
+        left_x = hemi_surface['left'][0][:, 0]
+        gap = (left_x.max() - left_x.min()) * 0.55
+        hemi_surface['left']  = (hemi_surface['left'][0]  - [gap, 0, 0], *hemi_surface['left'][1:])
+        hemi_surface['right'] = (hemi_surface['right'][0] + [gap, 0, 0], *hemi_surface['right'][1:])
+
+    # ROI boundaries are a categorical parcellation, sampled with
+    # nearest_most_frequent regardless of `interpolation` (linear would
+    # blend adjacent ROI integer IDs into meaningless in-between values) --
+    # projected once here, reused per hemisphere below. Only its per-vertex
+    # labels are used; geometry comes from hemi_surface (already offset
+    # above for the inflated case) since both were sampled onto the same
+    # display mesh and are otherwise identical.
+    roi_surface = (project_to_surface(roi_atlas_img, mesh_name=mesh_density, surface=surface_mesh,
+                                      interpolation='nearest_most_frequent')
+                   if roi_atlas_img is not None else None)
+
     all_verts = np.vstack([v for v, _, _ in hemi_surface.values()])
     brain_aspect = [all_verts[:, i].max() - all_verts[:, i].min() for i in range(3)]
 
@@ -253,15 +368,33 @@ def plot_block_surface(img, cmap='viridis', surface_opacity=0.05, brain_opacity=
         valid_vals = valid_vals[valid_vals > threshold]
     elif positive_only:
         valid_vals = valid_vals[valid_vals > 0]
-    vmin, vmax = (valid_vals.min(), valid_vals.max()) if valid_vals.size else (0, 1)
+    if vmax is None:
+        vmax = valid_vals.max() if valid_vals.size else 1
+    # anchor vmin to the cutoff itself (threshold, or 0 for positive_only) rather
+    # than the smallest surviving vertex -- using the min of what happens to
+    # survive makes the colour scale depend on incidental data sparsity (e.g.
+    # threshold=0 would map from some arbitrary near-zero value, not a clean 0),
+    # and shifts between reruns/subsets even when the cutoff itself is unchanged.
+    if vmin is None:
+        if threshold is not None:
+            vmin = threshold
+        elif positive_only:
+            vmin = 0
+        else:
+            vmin = valid_vals.min() if valid_vals.size else 0
 
     fig, axes = setup_views_figure(n_views=len(views))
     axes = np.atleast_1d(axes)
     for ax, (view_name, elev, azim) in zip(axes, views):
-        for vertices, faces, values in hemi_surface.values():
+        for hemi, (vertices, faces, values) in hemi_surface.items():
             plot_surface_scalar(ax, vertices, faces, values, cmap=cmap, vmin=vmin, vmax=vmax,
                                  background_color=background_color, background_opacity=brain_opacity,
-                                 opacity=roi_opacity, positive_only=positive_only, threshold=threshold)
+                                 opacity=roi_opacity, positive_only=positive_only, threshold=threshold,
+                                 shade_min=shade_min)
+            if roi_surface is not None:
+                roi_labels = roi_surface[hemi][2]
+                plot_roi_outlines(ax, vertices, faces, roi_labels,
+                                  color=outline_color, linewidth=outline_linewidth)
         finalize_view(ax, view_name, elev, azim, brain_aspect)
 
     return fig, axes
@@ -534,7 +667,8 @@ def block_membership_image(block_of_node, block_id, atlas_img):
 
 
 def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour='black', edge_alpha=0.5,
-                    min_edge_alpha=0.05, block_of_node=None, relevance=None, output_ext='svg'):
+                    min_edge_alpha=0.05, block_of_node=None, relevance=None, output_ext='svg',
+                    edge_color_gamma=3.0):
     """
     Fit a single (non-layered, non-annealed) nested SBM to `adj`, then draw
     that same fitted state twice with graph_tool's state.draw() — once per
@@ -584,6 +718,21 @@ def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour=
     higher-weight edges are less transparent than lower-weight ones, in
     both plots.
 
+    In the weight-fallback colouring of plot 2 (`relevance=None`), the raw
+    LogNorm position of each edge's |weight| is additionally raised to
+    `edge_color_gamma` (default 3.0) before indexing into `cmap` -- a
+    right-skewed weight distribution (many mid-strength edges, a few real
+    standouts) otherwise lands most edges in the colormap's upper-middle
+    band (e.g. plasma's orange), leaving purple/yellow doing almost no
+    work. `x**gamma` with gamma>1 leaves 0 and 1 fixed but pushes
+    mid-range x down, so typical edges render in the colormap's darker
+    range (e.g. plasma's pink) and only genuinely top-magnitude edges
+    reach the brightest end (e.g. yellow) -- making the strongest edges
+    visually stand out rather than blending in with the bulk. Set to 1.0
+    to recover the previous linear-in-LogNorm behaviour. Not applied to
+    edge_weight_alpha (transparency) or to the `relevance`-driven gradient
+    branch, which colours nodes by relevance rather than weight magnitude.
+
     Returns the graph_tool NestedBlockState (fitted, or wrapping the given
     `block_of_node` partition).
     """
@@ -614,6 +763,17 @@ def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour=
     # magnitude range instead.
     weights   = np.abs(np.array([weight[e] for e in g.edges()]))
     edge_norm = LogNorm(vmin=weights[weights > 0].min(), vmax=weights.max()) if weights.size else Normalize(0, 1)
+
+    # z-order for drawing: state.draw()/graph_draw() otherwise draws edges
+    # in graph edge-list order (essentially arbitrary relative to weight),
+    # so on a dense graph a low-weight, low-alpha edge frequently gets
+    # painted on top of and visually washes out a high-weight, high-alpha
+    # one drawn earlier. eorder makes the strongest edges paint last (on
+    # top) instead, independent of edge_alpha.
+    edge_zorder = g.new_edge_property('double')
+    for e in g.edges():
+        edge_zorder[e] = abs(weight[e])
+
     edge_weight_alpha = g.new_edge_property('double')
     for e in g.edges():
         edge_weight_alpha[e] = min_edge_alpha + (edge_alpha - min_edge_alpha) * edge_norm(abs(weight[e]))
@@ -685,6 +845,7 @@ def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour=
         vertex_font_size=10,
         edge_color=block_edge_color,
         edge_gradient=[],
+        eorder=edge_zorder,
         hedge_color=arrow_colour,
         hvertex_fill_color=arrow_colour,
         hvertex_color=arrow_colour,
@@ -738,7 +899,7 @@ def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour=
     else:
         edge_color = g.new_edge_property('vector<double>')
         for e in g.edges():
-            r, gg, bb, _ = cmap_obj(edge_norm(abs(weight[e])))
+            r, gg, bb, _ = cmap_obj(edge_norm(abs(weight[e])) ** edge_color_gamma)
             edge_color[e] = (r, gg, bb, edge_weight_alpha[e])
         edge_draw_kwargs = dict(edge_color=edge_color, edge_gradient=[])
 
@@ -746,6 +907,7 @@ def plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour=
         vertex_fill_color=degree_fill_color,
         vertex_size=degree_size,
         **edge_draw_kwargs,
+        eorder=edge_zorder,
         hedge_color=arrow_colour,
         hvertex_fill_color=arrow_colour,
         hvertex_color=arrow_colour,

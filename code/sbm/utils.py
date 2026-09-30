@@ -44,10 +44,14 @@ def log_msg(_string):
 #########################################
 
 
-def load_graphs(path, atlas, subject_list, part, score_col):
+def load_graphs(path, atlas, subject_list, part, score_col, disconnectomes_dir=None):
     '''
-    load disconnectomes and behaviour scores for subjects with valid data
+    load disconnectomes and behaviour scores for subjects with valid data.
+    disconnectomes_dir overrides the default {path}/DISCONNECTOMES (e.g.
+    DISCONNECTOMES400 for the 400-ROI atlas, now that DISCONNECTOMES itself
+    holds VoxelAtlas_* files).
     '''
+    disconnectomes_dir = disconnectomes_dir or os.path.join(path, 'DISCONNECTOMES')
     subject_list_clean = []
     behaviour = []
     adj_matrices_list = []
@@ -58,7 +62,7 @@ def load_graphs(path, atlas, subject_list, part, score_col):
         if val.size == 0 or val[0] in ('', 'nan', 'NaN'):
             subjects_missing_score.append(subject)
             continue
-        tmp = np.genfromtxt(os.path.join(path, 'DISCONNECTOMES', f'{subject}_{atlas}.tsv'), delimiter='\t')
+        tmp = np.genfromtxt(os.path.join(disconnectomes_dir, f'{subject}_{atlas}.tsv'), delimiter='\t')
         data = tmp[1:, 1:].astype(np.float32)
         if np.sum(data) == 0:
             empty_subjects.append(subject)
@@ -69,6 +73,33 @@ def load_graphs(path, atlas, subject_list, part, score_col):
     adj_matrices = np.stack(adj_matrices_list).astype(np.int32)
     behaviour = [float(v) for v in behaviour]
     return subject_list_clean, behaviour, adj_matrices, subjects_missing_score, empty_subjects
+
+
+def get_disco_format(disconnectomes_dir, atlas):
+    '''
+    detect whether a disconnectomes directory holds tsv (dense, labelled) or
+    npz (sparse: row, col, data, shape, roi_names) files for the given atlas
+    -- ARISE >=0.6 can emit either via its OutFormat flag. npz is preferred
+    if both are present.
+    '''
+    discos = os.listdir(disconnectomes_dir)
+    if any(f.endswith(f'_{atlas}.npz') for f in discos):
+        return 'npz'
+    return 'tsv'
+
+
+def load_disco_matrix(file_path, file_ext):
+    '''
+    load a single subject's disconnectome as a dense float32 matrix,
+    regardless of on-disk format.
+    '''
+    if file_ext == 'npz':
+        with np.load(file_path) as npz:
+            data = np.zeros(tuple(npz['shape']), dtype=np.float32)
+            data[npz['row'], npz['col']] = npz['data']
+        return data
+    tmp = np.genfromtxt(file_path, delimiter='\t')
+    return tmp[1:, 1:].astype(np.float32)
 
 
 def get_graph_layers(graph):

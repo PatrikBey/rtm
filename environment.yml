@@ -1,0 +1,58 @@
+# Conda environment for the RTM project.
+#
+# Everything that exists on conda-forge is pinned to conda-forge and solved in a
+# SINGLE transaction; only packages with no conda-forge build are left to pip.
+# This is the point of the file: the breakage this replaces was caused by pymc /
+# arviz / pytensor coming from conda-forge while numpy / scipy / pandas came from
+# pip, so the two stacks resolved against different pins and left a half-
+# overwritten pytensor tree that could not be imported.
+#
+# Rules to keep it working:
+#   - never `pip install` something that is already a conda-forge package here
+#   - never `pip install --force-reinstall` without `--no-deps`, or pip will
+#     silently upgrade numpy/pandas/scipy out from under the conda solve
+#
+# usage: conda env create -f environment.yml && conda activate rtm
+#
+name: rtm
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+
+  # --- core numerics -------------------------------------------------------
+  - numpy
+  - scipy
+  - pandas<3          # tabpfn and several other tools still require pandas 2.x
+  - statsmodels
+
+  # --- Bayesian RT modelling (code/modelling) ------------------------------
+  - pymc>=6.3
+  - arviz
+  # pytensor is a pymc dependency; let the solver pick the matching version
+  # rather than pinning or installing it separately
+
+  # --- stochastic block modelling (code/sbm) -------------------------------
+  - graph-tool        # conda-forge only, no pip wheel exists
+  - networkx
+
+  # --- neuroimaging --------------------------------------------------------
+  - nibabel
+  - nilearn
+  - dipy
+
+  # --- visualisation -------------------------------------------------------
+  - matplotlib
+  - fury              # code/visualizations/create_figures.py, visualizations.py
+
+  # --- misc ----------------------------------------------------------------
+  - scikit-learn
+  - scikit-image
+  - tqdm
+  - progress
+  - pip
+
+  - pip:
+      # no conda-forge build available
+      - pylater       # code/visualizations/visualizations.py

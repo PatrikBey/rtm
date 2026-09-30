@@ -49,10 +49,18 @@ args.add_argument('--tasks', type=str, nargs='+', default=['Foreperiod_Long_tau'
                   help='Behaviour scores to visualise (default: all three tasks)')
 args.add_argument('--fit_suffix', type=str, default='_singleflip',
                   help='Suffix of the observed SBMFITTING run directory (default: _singleflip)')
+args.add_argument('--run_dir', type=str, default='SBMFITTING',
+                  help='Name of the folder (inside data_path) containing per-task SBM fits '
+                       '(default: SBMFITTING)')
 args.add_argument('--out_dir', type=str, default=None,
-                  help='Output directory for the figures (default: {data_path}/SBMFITTING/FIGURES)')
+                  help='Output directory for the figures (default: {data_path}/{run_dir}/FIGURES)')
 args.add_argument('--ext', type=str, default='svg', choices=['svg', 'png'],
                   help='Output image format (default: svg)')
+args.add_argument('--edge_color_gamma', type=float, default=3.0,
+                  help='Gamma applied to each edge\'s LogNorm weight position before colouring '
+                       'the _weights plot (see utils.plot_sbm_state) -- higher pushes typical '
+                       'edges toward the colormap\'s darker end so only the strongest edges reach '
+                       'the brightest end (default: 3.0; 1.0 = old linear-in-LogNorm behaviour)')
 args.add_argument('--perm', type=str, default=None,
                   help='If given (e.g. perm_00000), plot that behaviour-permutation null '
                        'example from SBMNULL instead of the observed SBMFITTING fit -- same '
@@ -61,7 +69,7 @@ args.add_argument('--perm', type=str, default=None,
                        '{data_path}/SBMNULL/SBM_{atlas}_{task}_NULL/{perm}/')
 args = args.parse_args()
 
-out_dir = args.out_dir or os.path.join(args.data_path, 'SBMFITTING', 'FIGURES')
+out_dir = args.out_dir or os.path.join(args.data_path, args.run_dir, 'FIGURES')
 os.makedirs(out_dir, exist_ok=True)
 
 grouped_raw = np.genfromtxt(os.path.join(args.data_path, 'ATLAS', f'{args.atlas}_areas_grouped.txt'),
@@ -84,7 +92,7 @@ for task in args.tasks:
         fit_dir = os.path.join(args.data_path, 'SBMNULL', f'SBM_{args.atlas}_{task}_NULL', args.perm)
         tag = f'{task}_{args.perm}'
     else:
-        fit_dir = os.path.join(args.data_path, 'SBMFITTING', f'SBM_{args.atlas}_{task}{args.fit_suffix}')
+        fit_dir = os.path.join(args.data_path, args.run_dir, f'SBM_{args.atlas}_{task}{args.fit_suffix}')
         tag = task
 
     graph_path = os.path.join(fit_dir, f'SBM_final_graph_{task}.gt')
@@ -95,11 +103,14 @@ for task in args.tasks:
 
     assignments_path = os.path.join(fit_dir, f'roi_block_assignments_{task}.csv')
     with open(assignments_path, newline='') as fh:
-        rows = list(csv.DictReader(fh))
+        dialect = csv.Sniffer().sniff(fh.readline(), delimiters=',\t')
+        fh.seek(0)
+        rows = list(csv.DictReader(fh, dialect=dialect))
     level_cols    = sorted((c for c in rows[0] if c.startswith('level_')), key=lambda c: int(c.split('_')[1]))
     block_of_node = [np.array([int(row[c]) for row in rows]) for c in level_cols]
 
     output_prefix = os.path.join(out_dir, f'SBM_final_state_{tag}_joint')
     utils.plot_sbm_state(adj, node_groups, output_prefix, cmap='plasma', arrow_colour='gold',
-                         block_of_node=block_of_node, output_ext=args.ext)
+                         block_of_node=block_of_node, output_ext=args.ext,
+                         edge_color_gamma=args.edge_color_gamma)
     print(f'Saved → {output_prefix}_blocks.{args.ext} (+ _blocks_legend.{args.ext}, _weights.{args.ext})')
