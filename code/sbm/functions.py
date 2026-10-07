@@ -22,6 +22,7 @@
 
 # ---- import libraries ---- #
 import os
+import pickle
 
 import numpy as np
 import graph_tool.all as gt
@@ -934,7 +935,7 @@ def fit_nested_sbm_layered_multiflip(graph,
 
 def fit_nested_sbm_layered_noconv(graph, fixed_iter=5000, window_size=250,
                                   behaviour_dist='normal', cooccurrence_dist='poisson',
-                                  multiflip=False, seed=42):
+                                  multiflip=False, seed=42, initial_fit_path=None):
     """
     Same model / initialisation as fit_nested_sbm_layered, but with the
     mean-shift change-point criterion removed entirely: runs exactly
@@ -945,6 +946,15 @@ def fit_nested_sbm_layered_noconv(graph, fixed_iter=5000, window_size=250,
     (same keys), so every downstream output-writing step works unchanged;
     'converged'/'convergence_iteration' are kept for schema parity but are
     not meaningful here (no criterion was applied).
+
+    initial_fit_path : str or None — if given, the NestedBlockState from
+                        minimize_nested_blockmodel_dl is pickled to this path
+                        immediately, before the fixed_iter MCMC loop starts.
+                        Checkpoint only: lets a crashed/killed MCMC run (e.g.
+                        OOM during the accumulation window) still be
+                        inspected/resumed from the initial fit instead of
+                        losing everything, since nothing else is written to
+                        disk until this function returns.
     """
     gt.seed_rng(seed)
     g = graph.copy()
@@ -962,6 +972,11 @@ def fit_nested_sbm_layered_noconv(graph, fixed_iter=5000, window_size=250,
             )
         )
     )
+
+    if initial_fit_path is not None:
+        with open(initial_fit_path, 'wb') as fh:
+            pickle.dump(state, fh)
+        log_msg(f'| UPDATE | initial fit checkpoint saved -> {initial_fit_path}')
 
     n_verts = g.num_vertices()
     sweep = state.multiflip_mcmc_sweep if multiflip else state.mcmc_sweep

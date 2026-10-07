@@ -153,7 +153,8 @@ real_results = fit_nested_sbm_layered_noconv(
     behaviour_dist=args.behaviour_dist,
     cooccurrence_dist=args.cooccurrence_dist,
     multiflip=args.multiflip,
-    seed=args.seed
+    seed=args.seed,
+    initial_fit_path=os.path.join(output_dir, f'SBM_initial_state_{args.score}.pkl')
 )
 
 state_nested      = real_results['state']
